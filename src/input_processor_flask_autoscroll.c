@@ -210,24 +210,22 @@ void flask_autoscroll_jog_toggle(void) {
         return;
     }
 
-    bool entered = false;
-
     K_SPINLOCK(&data->lock) {
         if (data->jogging) {
             data->jogging = false;
         } else {
             data->level = 0; /* clears any stepped level */
             data->jogging = true;
-            entered = true;
         }
         data->deflection = 0;
         data->running = false;
     }
-    /* Entering jog starts at center — no ticks until the ball winds past the
-     * deadzone (handle_event arms the timer). Exiting cancels. */
-    if (!entered) {
-        k_work_cancel_delayable(&data->tick_work);
-    }
+    /* Cancel any pending tick either way. Exiting stops output; entering
+     * starts from center with no ticks owed — a leftover stepped-mode
+     * deadline must not pace the first jog notch (k_work_schedule on a
+     * still-pending item keeps the old deadline, so handle_event's re-arm
+     * at the correct jog interval would silently no-op). */
+    k_work_cancel_delayable(&data->tick_work);
 }
 
 int16_t flask_autoscroll_live_state(void) {
@@ -249,11 +247,22 @@ static int flask_autoscroll_handle_event(const struct device *dev, struct input_
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
+    /* Idle/stepped fast path: no lock on the per-event hot path (this runs
+     * for every REL event the scroll ball emits). An unlocked bool read is
+     * atomic on this hardware; a racing jog toggle costs at most one
+     * unswallowed event — the locked re-check below keeps the jog path
+     * itself consistent. */
+    if (!data->jogging) {
+        return ZMK_INPUT_PROC_CONTINUE;
+    }
+
+    bool jogging = false;
     bool arm = false;
     uint32_t interval = 0;
 
     K_SPINLOCK(&data->lock) {
-        if (!data->jogging) {
+        jogging = data->jogging;
+        if (!jogging) {
             K_SPINLOCK_BREAK;
         }
 
@@ -282,10 +291,6 @@ static int flask_autoscroll_handle_event(const struct device *dev, struct input_
     if (arm) {
         k_work_schedule(&data->tick_work, K_MSEC(interval));
     }
-
-    bool jogging;
-
-    K_SPINLOCK(&data->lock) { jogging = data->jogging; }
     return jogging ? ZMK_INPUT_PROC_STOP : ZMK_INPUT_PROC_CONTINUE;
 }
 
@@ -335,7 +340,15 @@ static const struct zmk_input_processor_driver_api flask_autoscroll_api = {
     .handle_event = flask_autoscroll_handle_event,
 };
 
+/* DT defaults feed the divisions in stepped_interval/jog_interval unclamped —
+ * reject out-of-range values at build time (runtime setters clamp). */
 #define FLASK_AUTOSCROLL_INST(n)                                                                   \
+    BUILD_ASSERT(DT_INST_PROP(n, speed_scale) >= 25 && DT_INST_PROP(n, speed_scale) <= 400,       \
+                 "speed-scale must be 25..400");                                                   \
+    BUILD_ASSERT(DT_INST_PROP(n, jog_range) >= 50 && DT_INST_PROP(n, jog_range) <= 2000,          \
+                 "jog-range must be 50..2000");                                                    \
+    BUILD_ASSERT(DT_INST_PROP(n, jog_deadzone) >= 0 && DT_INST_PROP(n, jog_deadzone) <= 200,      \
+                 "jog-deadzone must be 0..200");                                                   \
     static struct flask_autoscroll_data flask_autoscroll_data_##n;                                 \
     static const struct flask_autoscroll_dt_config flask_autoscroll_config_##n = {                 \
         .defaults = {                                                                              \

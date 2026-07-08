@@ -10,8 +10,8 @@
  * Transport: zzeneg/zmk-raw-hid (USB + BT), which already defaults to the
  * Flask HID identity (usage page 0xFF60, usage 0x61, 32-byte reports).
  *
- * The imprint protocol line starts at version 1 and is independent of the
- * QMK families' version lines. Value ids are append-only.
+ * The imprint protocol line is independent of the QMK families' version
+ * lines (v3 today — see FLASK_PROTO_VERSION). Value ids are append-only.
  *
  * SPDX-License-Identifier: MIT
  */
