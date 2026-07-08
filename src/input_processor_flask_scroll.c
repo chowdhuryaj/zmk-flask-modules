@@ -1,5 +1,5 @@
 /*
- * Flask PACS-safe scroll input processor.
+ * Flask rate-capped scroll input processor.
  *
  * Port of the Flask (QMK) drag-scroll conversion — see
  * svalboard-vial-qmk keymaps/flask/support_flask.c, scroll dump block.
@@ -9,8 +9,9 @@
  *   - notches accumulate and are dumped on a fixed interval, clamped to
  *     max-notches per axis per interval
  *   - surplus notches stay in the accumulator and drain on later intervals,
- *     so precision survives the cap and a reversal cancels pending surplus
- *     before any output flips sign (the iSite PACS anti-flood behavior)
+ *     so precision survives the cap, slow scroll consumers never see a
+ *     flood, and a reversal cancels pending surplus before any output
+ *     flips sign
  *
  * The processor swallows REL_X/REL_Y from the listener chain and re-emits
  * REL_HWHEEL/REL_WHEEL from its own device node on the dump timer; a second
@@ -32,7 +33,8 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 struct flask_scroll_config {
-    int32_t divisor;
+    int32_t divisor_x;
+    int32_t divisor_y;
     uint16_t interval_ms;
     int32_t max_notches;
     bool invert_x;
@@ -95,13 +97,13 @@ static int flask_scroll_handle_event(const struct device *dev, struct input_even
     K_SPINLOCK(&data->lock) {
         if (event->code == INPUT_REL_X) {
             data->rem_x += event->value;
-            int32_t notches = data->rem_x / cfg->divisor;
-            data->rem_x -= notches * cfg->divisor;
+            int32_t notches = data->rem_x / cfg->divisor_x;
+            data->rem_x -= notches * cfg->divisor_x;
             data->accum_h += notches;
         } else {
             data->rem_y += event->value;
-            int32_t notches = data->rem_y / cfg->divisor;
-            data->rem_y -= notches * cfg->divisor;
+            int32_t notches = data->rem_y / cfg->divisor_y;
+            data->rem_y -= notches * cfg->divisor_y;
             data->accum_v += notches;
         }
 
@@ -129,13 +131,19 @@ static const struct zmk_input_processor_driver_api flask_scroll_api = {
     .handle_event = flask_scroll_handle_event,
 };
 
+/* divisor-x / divisor-y of 0 fall back to the shared divisor */
+#define FLASK_SCROLL_DIV(n, axis)                                                                  \
+    (DT_INST_PROP(n, divisor_##axis) > 0 ? DT_INST_PROP(n, divisor_##axis)                         \
+                                         : DT_INST_PROP(n, divisor))
+
 #define FLASK_SCROLL_INST(n)                                                                       \
     BUILD_ASSERT(DT_INST_PROP(n, divisor) > 0, "divisor must be positive");                        \
     BUILD_ASSERT(DT_INST_PROP(n, interval_ms) > 0, "interval-ms must be positive");                \
     BUILD_ASSERT(DT_INST_PROP(n, max_notches) > 0, "max-notches must be positive");                \
     static struct flask_scroll_data flask_scroll_data_##n;                                         \
     static const struct flask_scroll_config flask_scroll_config_##n = {                            \
-        .divisor = DT_INST_PROP(n, divisor),                                                       \
+        .divisor_x = FLASK_SCROLL_DIV(n, x),                                                       \
+        .divisor_y = FLASK_SCROLL_DIV(n, y),                                                       \
         .interval_ms = DT_INST_PROP(n, interval_ms),                                               \
         .max_notches = DT_INST_PROP(n, max_notches),                                               \
         .invert_x = DT_INST_PROP(n, invert_x),                                                     \

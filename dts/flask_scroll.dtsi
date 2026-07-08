@@ -3,7 +3,7 @@
  * consuming keymap:
  *
  *   #include <flask_scroll.dtsi>
- *   &flask_scroll { divisor = <120>; invert-x; };
+ *   &flask_scroll { divisor-x = <16>; divisor-y = <12>; invert-x; };
  *   &trackball_central_listener { input-processors = <&flask_scroll>; };
  *   / {
  *       flask_scroll_out {
