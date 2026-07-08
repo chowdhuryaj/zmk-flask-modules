@@ -19,7 +19,7 @@ properties:
   divisor:
     type: int
     default: 8
-    description: Ball counts per wheel notch (Flask defaults: 8 PC, 120 macOS).
+    description: "Ball counts per wheel notch (Flask defaults: 8 PC, 120 macOS)."
 
   interval-ms:
     type: int
