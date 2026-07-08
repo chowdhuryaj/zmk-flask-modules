@@ -1,0 +1,6 @@
+name: zmk-flask-modules
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

@@ -1,0 +1,22 @@
+/*
+ * Default flask_scroll instance. Override properties and wire it up from the
+ * consuming keymap:
+ *
+ *   #include <flask_scroll.dtsi>
+ *   &flask_scroll { divisor = <120>; invert-x; };
+ *   &trackball_central_listener { input-processors = <&flask_scroll>; };
+ *   / {
+ *       flask_scroll_out {
+ *           compatible = "zmk,input-listener";
+ *           device = <&flask_scroll>;
+ *       };
+ *   };
+ */
+
+/ {
+    flask_scroll: flask_scroll {
+        compatible = "zmk,input-processor-flask-scroll";
+        #input-processor-cells = <0>;
+        status = "okay";
+    };
+};
