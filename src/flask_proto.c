@@ -24,6 +24,7 @@
 
 #include <zmk/event_manager.h>
 #include <zmk/keymap.h>
+#include <zmk/events/position_state_changed.h>
 #include <raw_hid/events.h>
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
@@ -42,8 +43,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * dragscroll became conditional (the Imprint dropped flask_scroll for the
  * stock ZMK scroll chain, so its 0x15 now answers unhandled). v4
  * (2026-07-08): jog mode removed — AS_DEADZONE/AS_RANGE (0x03/0x04) now
- * answer unhandled; autoscroll is stepped-only. */
-#define FLASK_PROTO_VERSION 4
+ * answer unhandled; autoscroll is stepped-only. v5 (2026-07-08): key-state
+ * channel 0x23 — GET 0x01 returns a pressed-position bitmap (bytes, not
+ * u16; position N = payload byte N/8 bit N%8), feeding the HUD's live
+ * key-press highlight (ZMK has no Vial matrix-state read). */
+#define FLASK_PROTO_VERSION 5
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -52,10 +56,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CMD_SAVE 0x09
 #define CMD_UNHANDLED 0xFF
 
-/* Channels (same numbering as the QMK families) */
+/* Channels (same numbering as the QMK families; 0x20-0x22 are NLKB16's —
+ * stay clear so channel ids keep meaning one thing across the ecosystem) */
 #define CH_META 0x00
 #define CH_DRAGSCROLL 0x15
 #define CH_AUTOSCROLL 0x1A
+#define CH_KEYSTATE 0x23
+
+/* Keystate values (read-only) */
+#define KEYSTATE_BITMAP 0x01 /* payload = pressed bitmap, byte N/8 bit N%8 */
 
 /* Meta values */
 #define META_PROTOCOL_VERSION 0x01
@@ -124,6 +133,45 @@ static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     default:
         return false;
     }
+}
+
+/* --- key-state bitmap (HUD live press highlight) ---
+ *
+ * Physical pressed positions, tracked from zmk_position_state_changed —
+ * pre-keymap, so it mirrors what QMK's Vial matrix-state read shows. On a
+ * split the central raises these events for peripheral keys too (absolute
+ * transformed positions — the same numbering combos use). 128 positions of
+ * headroom; the Imprint uses 0-69. */
+#define KEYSTATE_BYTES 16
+
+static uint8_t keystate_bitmap[KEYSTATE_BYTES];
+
+static int flask_keystate_listener(const zmk_event_t *eh) {
+    const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
+
+    if (ev == NULL || ev->position >= KEYSTATE_BYTES * 8) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    if (ev->state) {
+        keystate_bitmap[ev->position / 8] |= 1 << (ev->position % 8);
+    } else {
+        keystate_bitmap[ev->position / 8] &= ~(1 << (ev->position % 8));
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(flask_keystate, flask_keystate_listener);
+ZMK_SUBSCRIPTION(flask_keystate, zmk_position_state_changed);
+
+/* Payload is raw bitmap BYTES (not a u16 frame) — same payload-addressed
+ * convention as the NLKB16 display mirror. Read-only. */
+static bool handle_keystate(uint8_t cmd, uint8_t value_id, uint8_t *payload,
+                            size_t payload_len) {
+    if (cmd != CMD_GET || value_id != KEYSTATE_BITMAP) {
+        return false;
+    }
+    memcpy(payload, keystate_bitmap, MIN((size_t)KEYSTATE_BYTES, payload_len));
+    return true;
 }
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
@@ -310,6 +358,9 @@ static int flask_proto_received(const zmk_event_t *eh) {
         switch (channel) {
         case CH_META:
             ok = handle_meta(cmd, value_id, payload);
+            break;
+        case CH_KEYSTATE:
+            ok = handle_keystate(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
         case CH_DRAGSCROLL:
