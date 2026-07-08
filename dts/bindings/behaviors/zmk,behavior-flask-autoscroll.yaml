@@ -11,3 +11,6 @@ properties:
     type: int
     required: true
     const: 1
+
+binding-cells:
+  - param1
