@@ -48,15 +48,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define META_ACTIVE_LAYER 0x02
 #define META_FAMILY 0x03
 
-/* Dragscroll values — 0x01/0x03/0x06/0x07 match the QMK wire ids; the
- * per-axis ids are imprint-line additions (append-only). */
-#define DRAG_DIVISOR 0x01      /* set: both axes; get: y */
-#define DRAG_INVERTED 0x03     /* natural-scroll preference (vertical) */
+/* Dragscroll values — same wire vocabulary as the QMK families
+ * (flaskproto.js V.dragDivH/dragDivV/dragInverted/dragInterval/
+ * dragMaxNotches); invert-x is an imprint-line addition (append-only). */
+#define DRAG_DIVISOR_H 0x01
+#define DRAG_DIVISOR_V 0x02
+#define DRAG_INVERTED 0x03 /* natural-scroll preference (vertical) */
 #define DRAG_INTERVAL 0x06
 #define DRAG_MAX_NOTCHES 0x07
-#define DRAG_DIVISOR_X 0x08
-#define DRAG_DIVISOR_Y 0x09
-#define DRAG_INVERT_X 0x0A     /* orientation correction (horizontal) */
+#define DRAG_INVERT_X 0x0A /* orientation correction (horizontal) */
 
 struct flask_scroll_saved {
     uint8_t version;
@@ -102,8 +102,10 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
         uint16_t v = rd_u16(payload);
 
         switch (value_id) {
-        case DRAG_DIVISOR:
+        case DRAG_DIVISOR_H:
             p.divisor_x = v;
+            break;
+        case DRAG_DIVISOR_V:
             p.divisor_y = v;
             break;
         case DRAG_INVERTED:
@@ -114,12 +116,6 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
             break;
         case DRAG_MAX_NOTCHES:
             p.max_notches = v;
-            break;
-        case DRAG_DIVISOR_X:
-            p.divisor_x = v;
-            break;
-        case DRAG_DIVISOR_Y:
-            p.divisor_y = v;
             break;
         case DRAG_INVERT_X:
             p.invert_x = (v != 0);
@@ -137,12 +133,11 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     }
 
     switch (value_id) {
-    case DRAG_DIVISOR:
-    case DRAG_DIVISOR_Y:
-        wr_u16(payload, (uint16_t)p.divisor_y);
-        return true;
-    case DRAG_DIVISOR_X:
+    case DRAG_DIVISOR_H:
         wr_u16(payload, (uint16_t)p.divisor_x);
+        return true;
+    case DRAG_DIVISOR_V:
+        wr_u16(payload, (uint16_t)p.divisor_y);
         return true;
     case DRAG_INVERTED:
         wr_u16(payload, p.invert_y ? 1 : 0);
