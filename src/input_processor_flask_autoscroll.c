@@ -2,18 +2,20 @@
  * Flask autoscroll input processor — hands-free continuous scrolling.
  *
  * Port of the Flask (QMK) autoscroll module (Ben White stepped intervals +
- * Contour Shuttle jog model); see flask_autoscroll.h for the behavior
- * contract. Semantics preserved from the QMK source:
+ * a jog mode). Behavior:
  *   - stepped |level| 1..9 picks a tick interval from the canonical table,
  *     scaled by speed_scale_x100 (min 5 ms)
- *   - jog interval interpolates linearly from the slowest to the fastest
- *     stepped interval across [deadzone .. deadzone+range] deflection, so
- *     full deflection scrolls exactly as fast as stepped level 9
- *   - ball down (y+) scrolls down (wheel negative); `inverted` flips
+ *   - jog: REL_Y winds a velocity that BLEEDS toward zero each notch, so
+ *     scroll speed tracks how hard the ball is being rolled and a still
+ *     ball coasts to a stop — a trackball has no spring return, so the
+ *     original QMK held-position model pinned at the clamp and only ever
+ *     scrolled one way at one speed. |velocity| past the deadzone maps to
+ *     the stepped interval range (full = level-9 speed).
+ *   - direction follows the roll (matches mouse-follow); `inverted` flips
  *   - entering either mode re-arms a full interval before the first tick
  *
  * As an input processor it is transparent while idle or stepped; while
- * jogging it swallows REL_X/REL_Y and winds REL_Y into the deflection.
+ * jogging it swallows REL_X/REL_Y and winds REL_Y into the velocity.
  * Wheel ticks are emitted as REL_WHEEL from this node on a self-scheduled
  * timer — attach a second zmk,input-listener to this node to route them
  * onward (flask_scroll's IP-that-emits pattern).
@@ -48,7 +50,7 @@ struct flask_autoscroll_data {
     struct flask_autoscroll_params live;
     int8_t level;       /* stepped mode: signed speed level, 0 = stopped */
     bool jogging;       /* jog mode */
-    int32_t deflection; /* jog-wheel position, sensor counts, + = down */
+    int32_t velocity;   /* jog: recent ball velocity, bleeds toward 0 */
     bool running;       /* tick timer armed */
 };
 
@@ -109,12 +111,13 @@ static void current_tick(struct flask_autoscroll_data *data, int8_t *dir, uint32
     *interval = 0;
 
     if (data->jogging) {
-        int32_t mag = data->deflection < 0 ? -data->deflection : data->deflection;
+        int32_t mag = data->velocity < 0 ? -data->velocity : data->velocity;
         int32_t past = mag - data->live.jog_deadzone;
 
         if (past > 0) {
-            /* Ball down (y+) scrolls down — wheel negative. */
-            *dir = data->deflection > 0 ? -1 : 1;
+            /* Roll the ball the way the cursor would move → scroll the view
+             * the same way (matches mouse-follow); `inverted` flips it. */
+            *dir = data->velocity > 0 ? 1 : -1;
             *interval = jog_interval(data, (uint32_t)past);
         }
     } else if (data->level != 0) {
@@ -136,10 +139,29 @@ static void flask_autoscroll_tick(struct k_work *work) {
     uint32_t interval;
 
     K_SPINLOCK(&data->lock) {
-        current_tick(data, &dir, &interval);
-        data->running = (dir != 0);
+        current_tick(data, &dir, &interval); /* this notch, from current velocity */
+
+        /* Jog is a velocity, not a held position: bleed it toward zero each
+         * emitted notch so scroll speed tracks how hard the ball is being
+         * rolled and a still ball coasts to a stop within a few notches.
+         * (Stepped mode carries no velocity.) */
+        if (data->jogging && data->velocity != 0) {
+            int32_t d = AUTOSCROLL_JOG_DRAIN;
+
+            if (data->velocity > 0) {
+                data->velocity = data->velocity > d ? data->velocity - d : 0;
+            } else {
+                data->velocity = data->velocity < -d ? data->velocity + d : 0;
+            }
+        }
+
+        int8_t ndir;
+        uint32_t nint;
+
+        current_tick(data, &ndir, &nint); /* post-drain: still scrolling? */
+        data->running = (ndir != 0);
         if (data->running) {
-            k_work_schedule(&data->tick_work, K_MSEC(interval));
+            k_work_schedule(&data->tick_work, K_MSEC(nint));
         }
     }
 
@@ -178,7 +200,7 @@ void flask_autoscroll_stop(void) {
     K_SPINLOCK(&data->lock) {
         data->level = 0;
         data->jogging = false;
-        data->deflection = 0;
+        data->velocity = 0;
         data->running = false;
     }
     k_work_cancel_delayable(&data->tick_work);
@@ -193,7 +215,7 @@ void flask_autoscroll_step(int8_t direction) {
     K_SPINLOCK(&data->lock) {
         if (data->jogging) { /* stepping while jogging exits jog first */
             data->jogging = false;
-            data->deflection = 0;
+            data->velocity = 0;
             data->level = 0;
         }
         int8_t next = data->level + direction;
@@ -217,7 +239,7 @@ void flask_autoscroll_jog_toggle(void) {
             data->level = 0; /* clears any stepped level */
             data->jogging = true;
         }
-        data->deflection = 0;
+        data->velocity = 0;
         data->running = false;
     }
     /* Cancel any pending tick either way. Exiting stops output; entering
@@ -269,8 +291,8 @@ static int flask_autoscroll_handle_event(const struct device *dev, struct input_
         if (event->code == INPUT_REL_Y) {
             int32_t limit = (int32_t)data->live.jog_deadzone + data->live.jog_range;
 
-            data->deflection += event->value;
-            data->deflection = CLAMP(data->deflection, -limit, limit);
+            data->velocity += event->value;
+            data->velocity = CLAMP(data->velocity, -limit, limit);
 
             if (!data->running) {
                 int8_t dir;

@@ -2,18 +2,20 @@
  * Runtime API for the flask_autoscroll input processor.
  *
  * Port of Flask (QMK) autoscroll — Ben White's radiology autoscroller
- * (stepped speeds, 1000ms..25ms per wheel notch) plus the Contour Shuttle
- * jog model (ball deflection = speed). Two mutually exclusive modes:
+ * (stepped speeds, 1000ms..25ms per wheel notch) plus a jog mode. Two
+ * mutually exclusive modes:
  *
  *  - STEPPED: flask_autoscroll_step(+1/-1) moves a signed speed level
  *    (-9..9, 0 = stopped, stepping through zero stops). Each |level| picks
  *    a tick interval from the canonical table {1000,500,200,100,67,50,40,
  *    33,25} ms, scaled by speed_scale_x100. The ball keeps scrolling/moving
  *    normally in stepped mode.
- *  - JOG: flask_autoscroll_jog_toggle(). Ball vertical travel accumulates
- *    into a deflection (clamped to ±(deadzone+range)); scroll direction and
- *    speed follow it continuously with a deadzone around center. Ball
- *    motion is swallowed while jogging. Toggle again to exit and reset.
+ *  - JOG: flask_autoscroll_jog_toggle(). REL_Y winds a velocity (clamped to
+ *    ±(deadzone+range)) that bleeds toward zero each notch, so scroll speed
+ *    tracks how hard the ball is being rolled and a still ball coasts to a
+ *    stop; direction follows the roll. (A trackball has no spring return —
+ *    a held-position model would pin at the clamp and scroll one way at one
+ *    speed.) Ball motion is swallowed while jogging; toggle again to exit.
  *
  * Any other key press stops either mode when stop_on_key is set (same
  * auto-exit convention as the QMK firmwares; keycode events only — mouse
@@ -33,11 +35,18 @@
 
 struct flask_autoscroll_params {
     uint16_t speed_scale_x100; /* 100 = table as-is; clamped 25..400 */
-    uint16_t jog_deadzone;     /* counts ignored around center; 0..200 */
-    uint16_t jog_range;        /* counts past deadzone to full speed; 50..2000 */
+    uint16_t jog_deadzone;     /* velocity below this = no scroll; 0..200 */
+    uint16_t jog_range;        /* velocity past deadzone to full speed; 50..2000 */
     bool inverted;             /* flip scroll direction */
     bool stop_on_key;          /* any other key press stops autoscroll */
 };
+
+/* Jog velocity bled off per emitted notch (self-centering). Higher = the
+ * ball must be rolled harder to sustain speed and coasts to a stop sooner.
+ * Compile-time for now; the wire tunables are deadzone/range/scale. */
+#ifndef AUTOSCROLL_JOG_DRAIN
+#    define AUTOSCROLL_JOG_DRAIN 6
+#endif
 
 /* All return -ENODEV before the processor instance initializes. */
 int flask_autoscroll_params_get(struct flask_autoscroll_params *out);
