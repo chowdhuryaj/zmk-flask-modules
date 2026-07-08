@@ -26,7 +26,9 @@
 #include <zmk/keymap.h>
 #include <raw_hid/events.h>
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 #include <flask_scroll/flask_scroll.h>
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
 #include <flask_autoscroll/flask_autoscroll.h>
@@ -34,8 +36,12 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-/* v2 (2026-07-08): autoscroll channel 0x1A. */
-#define FLASK_PROTO_VERSION 2
+/* Per-module channels compile only when their module does — a channel whose
+ * module is absent answers unhandled (0xFF), which is how the apps discover
+ * capability. v2 (2026-07-08): autoscroll channel 0x1A. v3 (2026-07-08):
+ * dragscroll became conditional (the Imprint dropped flask_scroll for the
+ * stock ZMK scroll chain, so its 0x15 now answers unhandled). */
+#define FLASK_PROTO_VERSION 3
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -73,12 +79,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define AS_STATE 0x05       /* live: GET = level / 100 jogging; SET stops */
 #define AS_STOP_ON_KEY 0x06
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 struct flask_scroll_saved {
     uint8_t version;
     struct flask_scroll_params params;
 } __packed;
 
 #define SCROLL_SETTINGS_VERSION 1
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
 struct flask_autoscroll_saved {
@@ -115,6 +123,7 @@ static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     }
 }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     struct flask_scroll_params p;
 
@@ -179,6 +188,7 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
         return false;
     }
 }
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
 static bool handle_autoscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
@@ -251,6 +261,7 @@ static bool handle_autoscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
 
 static bool handle_save(uint8_t channel) {
     switch (channel) {
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
     case CH_DRAGSCROLL: {
         struct flask_scroll_saved saved = {.version = SCROLL_SETTINGS_VERSION};
 
@@ -264,6 +275,7 @@ static bool handle_save(uint8_t channel) {
         }
         return true;
     }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
     case CH_AUTOSCROLL: {
         struct flask_autoscroll_saved saved = {.version = AUTOSCROLL_SETTINGS_VERSION};
@@ -308,9 +320,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
         case CH_META:
             ok = handle_meta(cmd, value_id, payload);
             break;
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
         case CH_DRAGSCROLL:
             ok = handle_dragscroll(cmd, value_id, payload);
             break;
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
         case CH_AUTOSCROLL:
             ok = handle_autoscroll(cmd, value_id, payload);
@@ -344,6 +358,7 @@ ZMK_SUBSCRIPTION(flask_proto, raw_hid_received_event);
 
 static int flask_settings_set(const char *name, size_t len, settings_read_cb read_cb,
                               void *cb_arg) {
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
     if (settings_name_steq(name, "scroll", NULL)) {
         struct flask_scroll_saved saved;
 
@@ -364,6 +379,7 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         }
         return 0;
     }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
     if (settings_name_steq(name, "autoscroll", NULL)) {
         struct flask_autoscroll_saved saved;

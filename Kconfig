@@ -43,7 +43,7 @@ config ZMK_FLASK_PROTO
     depends on SETTINGS
     help
       Speaks the Flask tuning frame ([cmd, channel, value_id, u16 BE] in
-      32-byte reports) over zzeneg/zmk-raw-hid, exposing runtime knobs for
-      the flask modules (currently: meta + dragscroll + autoscroll channels)
-      to the Flask desktop/web configurators. Saved values persist via
-      Zephyr settings.
+      32-byte reports) over zzeneg/zmk-raw-hid, exposing runtime knobs to
+      the Flask desktop/web configurators. Per-module channels (dragscroll,
+      autoscroll) compile only when their module does; absent channels
+      answer unhandled. Saved values persist via Zephyr settings.

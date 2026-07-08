@@ -9,7 +9,7 @@ general-purpose; nothing here is tied to a particular app or workflow.
 
 | Module | Status | Flask origin |
 |---|---|---|
-| `flask_scroll` — rate-capped scroll converter | ✅ | `support_flask.c` drag-scroll dump |
+| `flask_scroll` — rate-capped scroll converter | ✅ (unused on Imprint — AJ prefers the stock ZMK scroll chain, 2026-07-08) | `support_flask.c` drag-scroll dump |
 | `flask_autoscroll` — hands-free continuous scroll (stepped + jog) | ✅ | `autoscroll` |
 | `flask_proto` — raw-HID runtime tuning (meta / dragscroll / autoscroll) | ✅ | `mad_hid.c` frame |
 | wheel chords | planned | `wheel_chords` |
