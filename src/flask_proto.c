@@ -28,9 +28,14 @@
 
 #include <flask_scroll/flask_scroll.h>
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
+#include <flask_autoscroll/flask_autoscroll.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#define FLASK_PROTO_VERSION 1
+/* v2 (2026-07-08): autoscroll channel 0x1A. */
+#define FLASK_PROTO_VERSION 2
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -42,6 +47,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* Channels (same numbering as the QMK families) */
 #define CH_META 0x00
 #define CH_DRAGSCROLL 0x15
+#define CH_AUTOSCROLL 0x1A
 
 /* Meta values */
 #define META_PROTOCOL_VERSION 0x01
@@ -58,12 +64,30 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define DRAG_MAX_NOTCHES 0x07
 #define DRAG_INVERT_X 0x0A /* orientation correction (horizontal) */
 
+/* Autoscroll values — same wire vocabulary as the QMK families
+ * (mad_hid_autoscroll_value in the Adept keymap.c). */
+#define AS_INVERTED 0x01
+#define AS_SPEED_SCALE 0x02 /* x100; 100 = Ben White's table as-is */
+#define AS_DEADZONE 0x03    /* jog: counts ignored around center */
+#define AS_RANGE 0x04       /* jog: counts past deadzone to full speed */
+#define AS_STATE 0x05       /* live: GET = level / 100 jogging; SET stops */
+#define AS_STOP_ON_KEY 0x06
+
 struct flask_scroll_saved {
     uint8_t version;
     struct flask_scroll_params params;
 } __packed;
 
 #define SCROLL_SETTINGS_VERSION 1
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
+struct flask_autoscroll_saved {
+    uint8_t version;
+    struct flask_autoscroll_params params;
+} __packed;
+
+#define AUTOSCROLL_SETTINGS_VERSION 1
+#endif
 
 static void wr_u16(uint8_t *p, uint16_t v) {
     p[0] = v >> 8;
@@ -156,6 +180,75 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     }
 }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
+static bool handle_autoscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_autoscroll_params p;
+
+    if (flask_autoscroll_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case AS_INVERTED:
+            p.inverted = (v != 0);
+            break;
+        case AS_SPEED_SCALE:
+            p.speed_scale_x100 = v;
+            break;
+        case AS_DEADZONE:
+            p.jog_deadzone = v;
+            break;
+        case AS_RANGE:
+            p.jog_range = v;
+            break;
+        case AS_STOP_ON_KEY:
+            p.stop_on_key = (v != 0);
+            break;
+        case AS_STATE:
+            /* Rescue switch: any SET stops autoscroll (never persisted). */
+            flask_autoscroll_stop();
+            wr_u16(payload, 0);
+            return true;
+        default:
+            return false;
+        }
+        flask_autoscroll_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_autoscroll_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case AS_INVERTED:
+        wr_u16(payload, p.inverted ? 1 : 0);
+        return true;
+    case AS_SPEED_SCALE:
+        wr_u16(payload, p.speed_scale_x100);
+        return true;
+    case AS_DEADZONE:
+        wr_u16(payload, p.jog_deadzone);
+        return true;
+    case AS_RANGE:
+        wr_u16(payload, p.jog_range);
+        return true;
+    case AS_STOP_ON_KEY:
+        wr_u16(payload, p.stop_on_key ? 1 : 0);
+        return true;
+    case AS_STATE:
+        wr_u16(payload, (uint16_t)flask_autoscroll_live_state());
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL */
+
 static bool handle_save(uint8_t channel) {
     switch (channel) {
     case CH_DRAGSCROLL: {
@@ -171,6 +264,21 @@ static bool handle_save(uint8_t channel) {
         }
         return true;
     }
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
+    case CH_AUTOSCROLL: {
+        struct flask_autoscroll_saved saved = {.version = AUTOSCROLL_SETTINGS_VERSION};
+
+        if (flask_autoscroll_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/autoscroll", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/autoscroll settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
     default:
         return false;
     }
@@ -203,6 +311,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
         case CH_DRAGSCROLL:
             ok = handle_dragscroll(cmd, value_id, payload);
             break;
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
+        case CH_AUTOSCROLL:
+            ok = handle_autoscroll(cmd, value_id, payload);
+            break;
+#endif
         default:
             break;
         }
@@ -251,6 +364,28 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         }
         return 0;
     }
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
+    if (settings_name_steq(name, "autoscroll", NULL)) {
+        struct flask_autoscroll_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/autoscroll settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != AUTOSCROLL_SETTINGS_VERSION) {
+            LOG_WRN("flask/autoscroll settings version %d ignored", saved.version);
+            return 0;
+        }
+        if (flask_autoscroll_params_set(&saved.params) < 0) {
+            LOG_WRN("flask/autoscroll restore: processor not ready");
+        }
+        return 0;
+    }
+#endif
     return -ENOENT;
 }
 

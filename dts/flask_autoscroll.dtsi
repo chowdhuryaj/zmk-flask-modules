@@ -1,0 +1,36 @@
+/*
+ * Default flask_autoscroll instance + &asc control behavior. Wire up from
+ * the consuming keymap:
+ *
+ *   #include <flask_autoscroll.dtsi>
+ *   #include <dt-bindings/flask/autoscroll.h>
+ *
+ *   // scroll-ball chain, BEFORE the scroll converter (jog swallows raw
+ *   // motion; transparent while idle or stepped)
+ *   &trackball_central_listener {
+ *       input-processors = <&flask_autoscroll &flask_scroll>;
+ *   };
+ *   / {
+ *       flask_autoscroll_out {
+ *           compatible = "zmk,input-listener";
+ *           device = <&flask_autoscroll>;
+ *       };
+ *   };
+ *
+ *   // keymap: &asc ASC_UP / &asc ASC_DOWN / &asc ASC_JOG / &asc ASC_STOP
+ */
+
+/ {
+    flask_autoscroll: flask_autoscroll {
+        compatible = "zmk,input-processor-flask-autoscroll";
+        #input-processor-cells = <0>;
+        status = "okay";
+    };
+
+    behaviors {
+        asc: flask_autoscroll_ctrl {
+            compatible = "zmk,behavior-flask-autoscroll";
+            #binding-cells = <1>;
+        };
+    };
+};

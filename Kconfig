@@ -12,6 +12,31 @@ config ZMK_INPUT_PROCESSOR_FLASK_SCROLL
       conversion — keeps slow scroll consumers from flooding or reversing
       under fast ball rolls, with no lost counts.
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL := zmk,input-processor-flask-autoscroll
+
+config ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL
+    bool "Flask autoscroll input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Hands-free continuous scrolling — port of the Flask (QMK) autoscroll
+      module. Stepped mode: a signed speed level (-9..9) ticks the wheel at
+      Ben White's canonical intervals (1000..25 ms). Jog mode: the ball
+      becomes a jog wheel (vertical deflection = direction/speed, motion
+      swallowed). Controlled by the &asc behavior; any other key press
+      stops it (runtime-tunable).
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_AUTOSCROLL := zmk,behavior-flask-autoscroll
+
+config ZMK_BEHAVIOR_FLASK_AUTOSCROLL
+    bool "Flask autoscroll behavior (&asc)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_AUTOSCROLL))
+    depends on ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL
+    help
+      Keymap behavior driving the flask autoscroll processor:
+      &asc ASC_UP / ASC_DOWN / ASC_JOG / ASC_STOP.
+
 config ZMK_FLASK_PROTO
     bool "Flask raw-HID runtime tuning protocol"
     depends on RAW_HID
@@ -19,5 +44,6 @@ config ZMK_FLASK_PROTO
     help
       Speaks the Flask tuning frame ([cmd, channel, value_id, u16 BE] in
       32-byte reports) over zzeneg/zmk-raw-hid, exposing runtime knobs for
-      the flask modules (currently: meta + scroll channels) to the Flask
-      desktop/web configurators. Saved values persist via Zephyr settings.
+      the flask modules (currently: meta + dragscroll + autoscroll channels)
+      to the Flask desktop/web configurators. Saved values persist via
+      Zephyr settings.
