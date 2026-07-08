@@ -2,7 +2,7 @@
 description: |
   Flask autoscroll control behavior. Param (dt-bindings/flask/autoscroll.h)
   selects the action — ASC_UP / ASC_DOWN step the signed speed level (through
-  zero = stop), ASC_JOG toggles jog mode, ASC_STOP force-stops.
+  zero = stop), ASC_STOP force-stops.
 
 compatible: "zmk,behavior-flask-autoscroll"
 

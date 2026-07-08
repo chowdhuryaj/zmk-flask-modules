@@ -2,8 +2,8 @@
  * &asc behavior — keymap entry points for flask autoscroll.
  *
  * One param (dt-bindings/flask/autoscroll.h): ASC_UP / ASC_DOWN step the
- * signed speed level (through zero = stop), ASC_JOG toggles jog mode,
- * ASC_STOP force-stops. Mirrors the QMK ASC_UP/ASC_DOWN/ASC_JOG keycodes.
+ * signed speed level (through zero = stop), ASC_STOP force-stops. Mirrors
+ * the QMK ASC_UP/ASC_DOWN keycodes.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -29,9 +29,6 @@ static int on_asc_binding_pressed(struct zmk_behavior_binding *binding,
         break;
     case ASC_DOWN:
         flask_autoscroll_step(-1);
-        break;
-    case ASC_JOG:
-        flask_autoscroll_jog_toggle();
         break;
     case ASC_STOP:
     default:

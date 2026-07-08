@@ -5,11 +5,9 @@
  *   #include <flask_autoscroll.dtsi>
  *   #include <dt-bindings/flask/autoscroll.h>
  *
- *   // scroll-ball chain, BEFORE the scroll converter (jog swallows raw
- *   // motion; transparent while idle or stepped)
- *   &trackball_central_listener {
- *       input-processors = <&flask_autoscroll &flask_scroll>;
- *   };
+ *   // stepped autoscroll emits from its own node; a second listener routes
+ *   // the wheel ticks onward. The processor never intercepts ball motion,
+ *   // so it does NOT go in the trackball's input-processors chain.
  *   / {
  *       flask_autoscroll_out {
  *           compatible = "zmk,input-listener";
@@ -17,7 +15,7 @@
  *       };
  *   };
  *
- *   // keymap: &asc ASC_UP / &asc ASC_DOWN / &asc ASC_JOG / &asc ASC_STOP
+ *   // keymap: &asc ASC_UP / &asc ASC_DOWN / &asc ASC_STOP
  */
 
 / {

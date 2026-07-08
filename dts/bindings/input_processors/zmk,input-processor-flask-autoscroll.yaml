@@ -2,11 +2,10 @@
 description: |
   Flask autoscroll — hands-free continuous scrolling. Stepped mode moves a
   signed speed level (-9..9) whose magnitude picks a tick interval from the
-  canonical table {1000,500,200,100,67,50,40,33,25} ms; jog mode turns the
-  ball into a jog wheel (vertical deflection = direction and speed, motion
-  swallowed). Wheel ticks are emitted as REL_WHEEL from this node — attach a
-  second zmk,input-listener to route them onward. Control via the &asc
-  behavior (ASC_UP / ASC_DOWN / ASC_JOG / ASC_STOP).
+  canonical table {1000,500,200,100,67,50,40,33,25} ms. Wheel ticks are
+  emitted as REL_WHEEL from this node — attach a second zmk,input-listener
+  to route them onward. Control via the &asc behavior (ASC_UP / ASC_DOWN /
+  ASC_STOP).
 
 compatible: "zmk,input-processor-flask-autoscroll"
 
@@ -17,16 +16,6 @@ properties:
     type: int
     default: 100
     description: "Speed scale x100: 100 = interval table as-is, 200 = twice as fast. Clamped 25..400."
-
-  jog-deadzone:
-    type: int
-    default: 15
-    description: Jog counts ignored around center before scrolling starts. Clamped 0..200.
-
-  jog-range:
-    type: int
-    default: 300
-    description: Jog counts past the deadzone that reach full (level-9) speed. Clamped 50..2000.
 
   inverted:
     type: boolean
