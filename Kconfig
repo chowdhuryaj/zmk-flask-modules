@@ -11,3 +11,13 @@ config ZMK_INPUT_PROCESSOR_FLASK_SCROLL
       notch cap, surplus carried forward. Port of the Flask (QMK) drag-scroll
       conversion — keeps slow scroll consumers from flooding or reversing
       under fast ball rolls, with no lost counts.
+
+config ZMK_FLASK_PROTO
+    bool "Flask raw-HID runtime tuning protocol"
+    depends on RAW_HID
+    depends on SETTINGS
+    help
+      Speaks the Flask tuning frame ([cmd, channel, value_id, u16 BE] in
+      32-byte reports) over zzeneg/zmk-raw-hid, exposing runtime knobs for
+      the flask modules (currently: meta + scroll channels) to the Flask
+      desktop/web configurators. Saved values persist via Zephyr settings.

@@ -1,0 +1,262 @@
+/*
+ * Flask raw-HID tuning protocol for ZMK — the "imprint" family line.
+ *
+ * Same frame the QMK Flask keyboards speak (mad_hid.c / AdeptProtocol.swift /
+ * flaskproto.js): 32-byte reports, [cmd, channel, value_id, u16 BE payload].
+ * Commands: 0x07 set, 0x08 get, 0x09 save; unhandled frames echo with the
+ * command byte replaced by 0xFF. Setters clamp before applying and echo the
+ * applied value — callers adopt the echo.
+ *
+ * Transport: zzeneg/zmk-raw-hid (USB + BT), which already defaults to the
+ * Flask HID identity (usage page 0xFF60, usage 0x61, 32-byte reports).
+ *
+ * The imprint protocol line starts at version 1 and is independent of the
+ * QMK families' version lines. Value ids are append-only.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <string.h>
+
+#include <zephyr/kernel.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/logging/log.h>
+
+#include <zmk/event_manager.h>
+#include <zmk/keymap.h>
+#include <raw_hid/events.h>
+
+#include <flask_scroll/flask_scroll.h>
+
+LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+
+#define FLASK_PROTO_VERSION 1
+#define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
+
+/* Commands (VIA custom-value ids, reused raw like the QMK side) */
+#define CMD_SET 0x07
+#define CMD_GET 0x08
+#define CMD_SAVE 0x09
+#define CMD_UNHANDLED 0xFF
+
+/* Channels (same numbering as the QMK families) */
+#define CH_META 0x00
+#define CH_DRAGSCROLL 0x15
+
+/* Meta values */
+#define META_PROTOCOL_VERSION 0x01
+#define META_ACTIVE_LAYER 0x02
+#define META_FAMILY 0x03
+
+/* Dragscroll values — 0x01/0x03/0x06/0x07 match the QMK wire ids; the
+ * per-axis ids are imprint-line additions (append-only). */
+#define DRAG_DIVISOR 0x01      /* set: both axes; get: y */
+#define DRAG_INVERTED 0x03     /* natural-scroll preference (vertical) */
+#define DRAG_INTERVAL 0x06
+#define DRAG_MAX_NOTCHES 0x07
+#define DRAG_DIVISOR_X 0x08
+#define DRAG_DIVISOR_Y 0x09
+#define DRAG_INVERT_X 0x0A     /* orientation correction (horizontal) */
+
+struct flask_scroll_saved {
+    uint8_t version;
+    struct flask_scroll_params params;
+} __packed;
+
+#define SCROLL_SETTINGS_VERSION 1
+
+static void wr_u16(uint8_t *p, uint16_t v) {
+    p[0] = v >> 8;
+    p[1] = v & 0xFF;
+}
+
+static uint16_t rd_u16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
+
+static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    if (cmd != CMD_GET) {
+        return false; /* meta is read-only */
+    }
+    switch (value_id) {
+    case META_PROTOCOL_VERSION:
+        wr_u16(payload, FLASK_PROTO_VERSION);
+        return true;
+    case META_ACTIVE_LAYER:
+        wr_u16(payload, zmk_keymap_highest_layer_active());
+        return true;
+    case META_FAMILY:
+        wr_u16(payload, FLASK_FAMILY_IMPRINT);
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_scroll_params p;
+
+    if (flask_scroll_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case DRAG_DIVISOR:
+            p.divisor_x = v;
+            p.divisor_y = v;
+            break;
+        case DRAG_INVERTED:
+            p.invert_y = (v != 0);
+            break;
+        case DRAG_INTERVAL:
+            p.interval_ms = v;
+            break;
+        case DRAG_MAX_NOTCHES:
+            p.max_notches = v;
+            break;
+        case DRAG_DIVISOR_X:
+            p.divisor_x = v;
+            break;
+        case DRAG_DIVISOR_Y:
+            p.divisor_y = v;
+            break;
+        case DRAG_INVERT_X:
+            p.invert_x = (v != 0);
+            break;
+        default:
+            return false;
+        }
+        flask_scroll_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_scroll_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case DRAG_DIVISOR:
+    case DRAG_DIVISOR_Y:
+        wr_u16(payload, (uint16_t)p.divisor_y);
+        return true;
+    case DRAG_DIVISOR_X:
+        wr_u16(payload, (uint16_t)p.divisor_x);
+        return true;
+    case DRAG_INVERTED:
+        wr_u16(payload, p.invert_y ? 1 : 0);
+        return true;
+    case DRAG_INVERT_X:
+        wr_u16(payload, p.invert_x ? 1 : 0);
+        return true;
+    case DRAG_INTERVAL:
+        wr_u16(payload, p.interval_ms);
+        return true;
+    case DRAG_MAX_NOTCHES:
+        wr_u16(payload, (uint16_t)p.max_notches);
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool handle_save(uint8_t channel) {
+    switch (channel) {
+    case CH_DRAGSCROLL: {
+        struct flask_scroll_saved saved = {.version = SCROLL_SETTINGS_VERSION};
+
+        if (flask_scroll_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/scroll", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/scroll settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static int flask_proto_received(const zmk_event_t *eh) {
+    struct raw_hid_received_event *event = as_raw_hid_received_event(eh);
+
+    if (event == NULL || event->length < 5) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    static uint8_t reply[CONFIG_RAW_HID_REPORT_SIZE];
+    memset(reply, 0, sizeof(reply));
+    memcpy(reply, event->data, MIN(event->length, sizeof(reply)));
+
+    uint8_t cmd = reply[0];
+    uint8_t channel = reply[1];
+    uint8_t value_id = reply[2];
+    uint8_t *payload = &reply[3];
+    bool ok = false;
+
+    switch (cmd) {
+    case CMD_GET:
+    case CMD_SET:
+        switch (channel) {
+        case CH_META:
+            ok = handle_meta(cmd, value_id, payload);
+            break;
+        case CH_DRAGSCROLL:
+            ok = handle_dragscroll(cmd, value_id, payload);
+            break;
+        default:
+            break;
+        }
+        break;
+    case CMD_SAVE:
+        ok = handle_save(channel);
+        break;
+    default:
+        break;
+    }
+
+    if (!ok) {
+        reply[0] = CMD_UNHANDLED;
+    }
+
+    struct raw_hid_sent_event sent = {.data = reply, .length = sizeof(reply)};
+    raise_raw_hid_sent_event(sent);
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(flask_proto, flask_proto_received);
+ZMK_SUBSCRIPTION(flask_proto, raw_hid_received_event);
+
+/* --- boot-time restore of saved tuning --- */
+
+static int flask_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                              void *cb_arg) {
+    if (settings_name_steq(name, "scroll", NULL)) {
+        struct flask_scroll_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/scroll settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != SCROLL_SETTINGS_VERSION) {
+            LOG_WRN("flask/scroll settings version %d ignored", saved.version);
+            return 0;
+        }
+        if (flask_scroll_params_set(&saved.params) < 0) {
+            LOG_WRN("flask/scroll restore: processor not ready");
+        }
+        return 0;
+    }
+    return -ENOENT;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(flask, "flask", NULL, flask_settings_set, NULL, NULL);
