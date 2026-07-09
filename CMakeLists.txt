@@ -10,6 +10,10 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_AUTOSCROLL app PRIVATE src/behavior_flask_autoscroll.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_RGB app PRIVATE src/behavior_flask_rgb.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_PROTO app PRIVATE src/flask_proto.c)
+  # After flask_proto.c on purpose: event subscriptions run in link order,
+  # and the HUD keystate listener (flask_proto.c) must see raw position
+  # events BEFORE flask_combos captures them.
+  target_sources_ifdef(CONFIG_ZMK_FLASK_COMBOS app PRIVATE src/flask_combos.c)
   if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
     target_sources(app PRIVATE src/flask_rgb_split_central.c)
   endif()

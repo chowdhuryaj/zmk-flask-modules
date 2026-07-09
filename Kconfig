@@ -79,3 +79,15 @@ config ZMK_FLASK_PROTO
       the Flask desktop/web configurators. Per-module channels (dragscroll,
       autoscroll) compile only when their module does; absent channels
       answer unhandled. Saved values persist via Zephyr settings.
+
+config ZMK_FLASK_COMBOS
+    bool "Flask runtime combos"
+    depends on SETTINGS
+    help
+      Runtime-editable combos (the Vial dynamic-combos analog): 32 slots of
+      up to 4 key positions firing an encoded keycode+modifiers output,
+      edited live over the Flask protocol (channel 0x24) and persisted via
+      settings. ZMK's devicetree combos are const config and ZMK Studio has
+      no combo RPC — this module is the live-editing path; it coexists with
+      devicetree combos. Central-only on splits (no DT node — enable
+      explicitly in the board .conf).

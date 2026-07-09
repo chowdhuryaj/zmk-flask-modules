@@ -39,6 +39,10 @@
 #include <flask_rgb/flask_rgb.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+#include <flask_combos/flask_combos.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -53,8 +57,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * key-press highlight (ZMK has no Vial matrix-state read). v6 (2026-07-09):
  * RGB map channel 0x21 (flask_rgb) — same wire shape as the QMK NLKB16:
  * enabled 0x01 u16, layers 0x02 / leds 0x03 RO u16, LED 0x10 + fill 0x12
- * payload-addressed byte frames; SAVE persists via "flask/rgbmap". */
-#define FLASK_PROTO_VERSION 6
+ * payload-addressed byte frames; SAVE persists via "flask/rgbmap".
+ * v7 (2026-07-09): runtime combos channel 0x24 (flask_combos) — enabled
+ * 0x01 u16, slot count 0x02 RO u16, timeout ms 0x03 u16, slot 0x10
+ * payload-addressed [slot, pos x4 (0xFF empty), usage u32 BE]; SAVE
+ * persists via "flask/combos". */
+#define FLASK_PROTO_VERSION 7
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -70,6 +78,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_AUTOSCROLL 0x1A
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
+#define CH_COMBOS 0x24
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape) */
 #define RGBMAP_ENABLED 0x01
@@ -80,6 +89,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Keystate values (read-only) */
 #define KEYSTATE_BITMAP 0x01 /* payload = pressed bitmap, byte N/8 bit N%8 */
+
+/* Combos values (channel 0x24) */
+#define COMBOS_ENABLED 0x01
+#define COMBOS_SLOT_COUNT 0x02 /* RO */
+#define COMBOS_TIMEOUT 0x03    /* global candidate window, ms */
+#define COMBOS_SLOT 0x10       /* payload-addressed: [slot, pos x4, usage u32 BE] */
 
 /* Meta values */
 #define META_PROTOCOL_VERSION 0x01
@@ -362,6 +377,62 @@ static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
 }
 #endif /* CONFIG_ZMK_FLASK_RGB */
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+/* Channel 0x24 — the slot value is a PAYLOAD-ADDRESSED byte frame:
+ * [slot, pos0..pos3 (0xFF = empty), usage u32 BE]. GET reads [slot] and
+ * answers in place; SET applies (normalized) and echoes what stuck. */
+static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
+                          size_t payload_len) {
+    switch (value_id) {
+    case COMBOS_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_combos_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_combos_enabled() ? 1 : 0);
+        return true;
+    case COMBOS_SLOT_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_combos_slot_count());
+        return true;
+    case COMBOS_TIMEOUT:
+        if (cmd == CMD_SET) {
+            flask_combos_set_timeout_ms(rd_u16(payload));
+        }
+        wr_u16(payload, flask_combos_timeout_ms());
+        return true;
+    case COMBOS_SLOT: {
+        if (payload_len < 1 + FLASK_COMBOS_KEYS + 4) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_combo_slot s;
+
+        if (cmd == CMD_SET) {
+            memcpy(s.pos, &payload[1], FLASK_COMBOS_KEYS);
+            s.usage = ((uint32_t)payload[5] << 24) | ((uint32_t)payload[6] << 16) |
+                      ((uint32_t)payload[7] << 8) | payload[8];
+            if (flask_combos_slot_set(slot, &s) != 0) {
+                return false;
+            }
+        }
+        if (flask_combos_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        memcpy(&payload[1], s.pos, FLASK_COMBOS_KEYS);
+        payload[5] = s.usage >> 24;
+        payload[6] = s.usage >> 16;
+        payload[7] = s.usage >> 8;
+        payload[8] = s.usage;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_COMBOS */
+
 static bool handle_save(uint8_t channel) {
     switch (channel) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
@@ -397,6 +468,10 @@ static bool handle_save(uint8_t channel) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     case CH_RGBMAP:
         return flask_rgb_save() == 0;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+    case CH_COMBOS:
+        return flask_combos_save() == 0;
 #endif
     default:
         return false;
@@ -443,6 +518,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
         case CH_RGBMAP:
             ok = handle_rgbmap(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+        case CH_COMBOS:
+            ok = handle_combos(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
         default:
@@ -520,6 +600,11 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     if (settings_name_steq(name, "rgbmap", NULL)) {
         return flask_rgb_settings_restore(len, read_cb, cb_arg);
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+    if (settings_name_steq(name, "combos", NULL)) {
+        return flask_combos_settings_restore(len, read_cb, cb_arg);
     }
 #endif
     return -ENOENT;
