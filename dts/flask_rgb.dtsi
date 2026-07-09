@@ -1,0 +1,36 @@
+/*
+ * &frgb control behavior for flask_rgb. The flask,rgb node itself is
+ * board-specific (it needs the strip phandle + this half's slice of the
+ * global LED index space), so it lives in the consuming keymap/overlay:
+ *
+ *   #include <flask_rgb.dtsi>
+ *   #include <dt-bindings/flask/rgb.h>
+ *
+ *   / {
+ *       flask_rgb: flask_rgb {
+ *           compatible = "flask,rgb";
+ *           led-strip = <&led_strip>;
+ *           led-count = <35>;      // this half's LEDs
+ *           total-leds = <70>;     // map width (whole keyboard)
+ *           layers = <10>;         // match the keymap layer count
+ *       };
+ *   };
+ *
+ *   // build.yaml, peripheral half only (global index of its LED 0):
+ *   //   cmake-args: -DCONFIG_ZMK_FLASK_RGB_LED_OFFSET=35
+ *
+ *   // keymap: &frgb FRGB_TOG / &frgb FRGB_ON / &frgb FRGB_OFF
+ *
+ * Both halves hold the full map; each renders only its slice. The active
+ * layer + map edits reach the peripheral over the module's own split GATT
+ * characteristic (see src/flask_rgb_split_*.c).
+ */
+
+/ {
+    behaviors {
+        frgb: flask_rgb_ctrl {
+            compatible = "zmk,behavior-flask-rgb";
+            #binding-cells = <1>;
+        };
+    };
+};

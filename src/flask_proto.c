@@ -35,6 +35,10 @@
 #include <flask_autoscroll/flask_autoscroll.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+#include <flask_rgb/flask_rgb.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -46,8 +50,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * answer unhandled; autoscroll is stepped-only. v5 (2026-07-08): key-state
  * channel 0x23 — GET 0x01 returns a pressed-position bitmap (bytes, not
  * u16; position N = payload byte N/8 bit N%8), feeding the HUD's live
- * key-press highlight (ZMK has no Vial matrix-state read). */
-#define FLASK_PROTO_VERSION 5
+ * key-press highlight (ZMK has no Vial matrix-state read). v6 (2026-07-09):
+ * RGB map channel 0x21 (flask_rgb) — same wire shape as the QMK NLKB16:
+ * enabled 0x01 u16, layers 0x02 / leds 0x03 RO u16, LED 0x10 + fill 0x12
+ * payload-addressed byte frames; SAVE persists via "flask/rgbmap". */
+#define FLASK_PROTO_VERSION 6
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -61,7 +68,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_META 0x00
 #define CH_DRAGSCROLL 0x15
 #define CH_AUTOSCROLL 0x1A
+#define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
+
+/* RGB map values (channel 0x21, QMK NLKB16 wire shape) */
+#define RGBMAP_ENABLED 0x01
+#define RGBMAP_LAYERS 0x02 /* RO */
+#define RGBMAP_LEDS 0x03   /* RO */
+#define RGBMAP_LED 0x10    /* payload-addressed: [layer, led, h, s, v] */
+#define RGBMAP_FILL 0x12   /* payload-addressed: [layer, h, s, v] */
 
 /* Keystate values (read-only) */
 #define KEYSTATE_BITMAP 0x01 /* payload = pressed bitmap, byte N/8 bit N%8 */
@@ -298,6 +313,55 @@ static bool handle_autoscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL */
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+/* Channel 0x21 — the LED/fill values are PAYLOAD-ADDRESSED byte frames
+ * (the app's getBytes/setBytes path), the rest are u16. GET of the LED
+ * value reads [layer, led] from the payload and answers in place with
+ * [layer, led, h, s, v] — via.c-style echo semantics. */
+static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
+                          size_t payload_len) {
+    switch (value_id) {
+    case RGBMAP_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_rgb_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_rgb_enabled() ? 1 : 0);
+        return true;
+    case RGBMAP_LAYERS:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_rgb_layers());
+        return true;
+    case RGBMAP_LEDS:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_rgb_total_leds());
+        return true;
+    case RGBMAP_LED: {
+        if (payload_len < 5) {
+            return false;
+        }
+        uint8_t layer = payload[0];
+        uint16_t led = payload[1];
+
+        if (cmd == CMD_SET) {
+            return flask_rgb_set_led(layer, led, &payload[2]) == 0;
+        }
+        return flask_rgb_get_led(layer, led, &payload[2]) == 0;
+    }
+    case RGBMAP_FILL:
+        if (cmd != CMD_SET || payload_len < 4) {
+            return false;
+        }
+        return flask_rgb_fill(payload[0], &payload[1]) == 0;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_RGB */
+
 static bool handle_save(uint8_t channel) {
     switch (channel) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
@@ -329,6 +393,10 @@ static bool handle_save(uint8_t channel) {
         }
         return true;
     }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+    case CH_RGBMAP:
+        return flask_rgb_save() == 0;
 #endif
     default:
         return false;
@@ -370,6 +438,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
         case CH_AUTOSCROLL:
             ok = handle_autoscroll(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+        case CH_RGBMAP:
+            ok = handle_rgbmap(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
         default:
@@ -442,6 +515,11 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
             LOG_WRN("flask/autoscroll restore: processor not ready");
         }
         return 0;
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+    if (settings_name_steq(name, "rgbmap", NULL)) {
+        return flask_rgb_settings_restore(len, read_cb, cb_arg);
     }
 #endif
     return -ENOENT;

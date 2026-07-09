@@ -37,6 +37,38 @@ config ZMK_BEHAVIOR_FLASK_AUTOSCROLL
       Keymap behavior driving the flask autoscroll processor:
       &asc ASC_UP / ASC_DOWN / ASC_JOG / ASC_STOP.
 
+DT_COMPAT_FLASK_RGB := flask,rgb
+
+config ZMK_FLASK_RGB
+    bool "Flask per-key per-layer RGB map"
+    default $(dt_compat_enabled,$(DT_COMPAT_FLASK_RGB))
+    depends on LED_STRIP
+    help
+      Runtime-editable per-key per-layer HSV map (the ZMK analog of the QMK
+      Flask RGBMAP feature, channel 0x21). Both split halves hold the full
+      map and render their own slice; the active layer and map edits reach
+      the peripheral over a module-owned split GATT characteristic. Keep
+      ZMK_RGB_UNDERGLOW off — both would drive the same strip.
+
+config ZMK_FLASK_RGB_LED_OFFSET
+    int "Global index of this half's first LED"
+    depends on ZMK_FLASK_RGB
+    default 0
+    help
+      Where this build's strip sits in the global LED index space: 0 on the
+      central half; the central's led-count on the peripheral (set via
+      build.yaml cmake-args on the peripheral build).
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_RGB := zmk,behavior-flask-rgb
+
+config ZMK_BEHAVIOR_FLASK_RGB
+    bool "Flask RGB behavior (&frgb)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_RGB))
+    depends on ZMK_FLASK_RGB
+    help
+      Keymap behavior controlling the flask_rgb map:
+      &frgb FRGB_TOG / FRGB_ON / FRGB_OFF.
+
 config ZMK_FLASK_PROTO
     bool "Flask raw-HID runtime tuning protocol"
     depends on RAW_HID

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+description: |
+  Flask RGB map control behavior. Param (dt-bindings/flask/rgb.h) selects the
+  action — FRGB_TOG toggles the per-layer map, FRGB_ON / FRGB_OFF force it.
+
+compatible: "zmk,behavior-flask-rgb"
+
+properties:
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+
+binding-cells:
+  - param1

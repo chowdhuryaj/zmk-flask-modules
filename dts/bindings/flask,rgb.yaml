@@ -1,0 +1,31 @@
+# flask_rgb — per-key per-layer RGB map (runtime-editable, Flask channel 0x21).
+#
+# One node per build, shared by both split halves (same keymap/devicetree).
+# The half-specific piece — where this half's LEDs sit in the global index
+# space — is CONFIG_ZMK_FLASK_RGB_LED_OFFSET (set per-build in build.yaml;
+# 0 on the central, the central's led-count on the peripheral).
+
+description: Flask per-key per-layer RGB map
+
+compatible: "flask,rgb"
+
+properties:
+  led-strip:
+    type: phandle
+    required: true
+    description: The LED strip device this half renders to.
+
+  led-count:
+    type: int
+    required: true
+    description: Number of LEDs on this half's strip.
+
+  total-leds:
+    type: int
+    required: true
+    description: Total LEDs across the whole keyboard (map width).
+
+  layers:
+    type: int
+    default: 10
+    description: Layers in the color map (match the keymap's layer count).

@@ -1,8 +1,20 @@
-if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-  zephyr_include_directories(include)
+zephyr_include_directories(include)
 
+# flask_rgb runs on BOTH split halves — each renders its own strip slice;
+# the role-specific split-sync sources are gated below.
+target_sources_ifdef(CONFIG_ZMK_FLASK_RGB app PRIVATE src/flask_rgb.c)
+
+if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL app PRIVATE src/input_processor_flask_scroll.c)
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL app PRIVATE src/input_processor_flask_autoscroll.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_AUTOSCROLL app PRIVATE src/behavior_flask_autoscroll.c)
+  target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_RGB app PRIVATE src/behavior_flask_rgb.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_PROTO app PRIVATE src/flask_proto.c)
+  if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
+    target_sources(app PRIVATE src/flask_rgb_split_central.c)
+  endif()
+else()
+  if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
+    target_sources(app PRIVATE src/flask_rgb_split_peripheral.c)
+  endif()
 endif()
