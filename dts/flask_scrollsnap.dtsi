@@ -1,0 +1,21 @@
+/*
+ * Default flask_scrollsnap instance. Goes at the END of the scroll ball's
+ * listener chain, after the xy→wheel mapper and any transforms:
+ *
+ *   #include <flask_scrollsnap.dtsi>
+ *   // in the scroll listener:
+ *   //   input-processors = <... &zip_xy_to_scroll_mapper
+ *   //                       &zip_scroll_transform INPUT_TRANSFORM_X_INVERT
+ *   //                       &flask_scrollsnap>;
+ *
+ * Snaps/locks wheel events in place — no swallow/re-emit, no second
+ * listener needed.
+ */
+
+/ {
+    flask_scrollsnap: flask_scrollsnap {
+        compatible = "zmk,input-processor-flask-scrollsnap";
+        #input-processor-cells = <0>;
+        status = "okay";
+    };
+};

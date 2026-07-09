@@ -20,6 +20,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -309,67 +311,123 @@ int flask_macros_playing_slot(void) {
     return slot;
 }
 
-/* --- persistence (settings key "flask/macros") --- */
+/* --- persistence (settings subtree "flask/macros") ---
+ *
+ * v2 layout (2026-07-09, capacities round): one entry per USED slot —
+ * "flask/macros/s<idx>" holds the used-steps PREFIX of the slot (length =
+ * steps up to the last non-empty, x step size), "flask/macros/cfg" the
+ * globals. Empty slots are deleted. NVS caps a single entry near its
+ * sector size, so the old whole-table blob stopped scaling past ~4 KB;
+ * per-slot prefix entries cost what the macro actually uses. The v1 blob
+ * (exact "flask/macros" leaf) is ignored on load — it never reached
+ * hardware. */
 
-struct flask_macros_saved {
+struct flask_macros_saved_cfg {
     uint8_t version;
     uint8_t enabled;
     uint16_t tap_ms;
     uint16_t wait_ms;
-    struct flask_macro_step steps[FLASK_MACROS_SLOTS][FLASK_MACROS_STEPS];
 } __packed;
 
-#define MACROS_SETTINGS_VERSION 1
+#define MACROS_SETTINGS_VERSION 2
 
 int flask_macros_save(void) {
-    static struct flask_macros_saved saved; /* ~1.3 KB — keep off the stack */
+    struct flask_macros_saved_cfg saved = {.version = MACROS_SETTINGS_VERSION};
+    /* One slot's steps — copied under the lock, written outside it. */
+    static struct flask_macro_step slot[FLASK_MACROS_STEPS];
 
-    saved.version = MACROS_SETTINGS_VERSION;
     K_SPINLOCK(&cfg_lock) {
         saved.enabled = cfg.enabled ? 1 : 0;
         saved.tap_ms = cfg.tap_ms;
         saved.wait_ms = cfg.wait_ms;
-        memcpy(saved.steps, cfg.steps, sizeof(saved.steps));
     }
 
-    int err = settings_save_one("flask/macros", &saved, sizeof(saved));
+    int err = settings_save_one("flask/macros/cfg", &saved, sizeof(saved));
 
     if (err) {
-        LOG_ERR("flask/macros settings save failed: %d", err);
+        LOG_ERR("flask/macros/cfg settings save failed: %d", err);
         return err;
+    }
+
+    for (int m = 0; m < FLASK_MACROS_SLOTS; m++) {
+        int used = 0;
+        char key[24];
+
+        K_SPINLOCK(&cfg_lock) {
+            memcpy(slot, cfg.steps[m], sizeof(slot));
+        }
+        for (int s = 0; s < FLASK_MACROS_STEPS; s++) {
+            if (slot[s].action != FLASK_MACRO_ACTION_EMPTY) {
+                used = s + 1;
+            }
+        }
+
+        snprintf(key, sizeof(key), "flask/macros/s%d", m);
+        err = (used == 0)
+                  ? settings_delete(key)
+                  : settings_save_one(key, slot, used * sizeof(struct flask_macro_step));
+        if (err) {
+            LOG_ERR("%s settings save failed: %d", key, err);
+            return err;
+        }
     }
     return 0;
 }
 
-int flask_macros_settings_restore(size_t len, settings_read_cb read_cb, void *cb_arg) {
-    static struct flask_macros_saved saved;
-
-    if (len != sizeof(saved)) {
-        LOG_WRN("flask/macros settings size mismatch (%d != %d)", (int)len, (int)sizeof(saved));
-        return -EINVAL;
-    }
-    if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
-        return -EIO;
-    }
-    if (saved.version != MACROS_SETTINGS_VERSION) {
-        LOG_WRN("flask/macros settings version %d ignored", saved.version);
+/* Restore one entry of the "flask/macros" subtree; sub is the name past
+ * the subtree ("cfg", "s<idx>", or NULL for the retired v1 blob leaf). */
+int flask_macros_settings_restore(const char *sub, size_t len, settings_read_cb read_cb,
+                                  void *cb_arg) {
+    if (sub == NULL) {
+        LOG_WRN("flask/macros v1 blob ignored (per-slot layout since v2)");
         return 0;
     }
 
-    K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = saved.enabled != 0;
-        cfg.tap_ms = CLAMP(saved.tap_ms, TAP_MIN_MS, TAP_MAX_MS);
-        cfg.wait_ms = CLAMP(saved.wait_ms, WAIT_MIN_MS, WAIT_MAX_MS);
-        memcpy(cfg.steps, saved.steps, sizeof(cfg.steps));
-        for (int m = 0; m < FLASK_MACROS_SLOTS; m++) {
-            for (int s = 0; s < FLASK_MACROS_STEPS; s++) {
-                if (cfg.steps[m][s].action > FLASK_MACRO_ACTION_WAIT) {
-                    cfg.steps[m][s].action = FLASK_MACRO_ACTION_EMPTY;
-                }
+    if (strcmp(sub, "cfg") == 0) {
+        struct flask_macros_saved_cfg saved;
+
+        if (len != sizeof(saved) || read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            LOG_WRN("flask/macros/cfg unreadable (len %d)", (int)len);
+            return 0;
+        }
+        if (saved.version != MACROS_SETTINGS_VERSION) {
+            LOG_WRN("flask/macros/cfg version %d ignored", saved.version);
+            return 0;
+        }
+        K_SPINLOCK(&cfg_lock) {
+            cfg.enabled = saved.enabled != 0;
+            cfg.tap_ms = CLAMP(saved.tap_ms, TAP_MIN_MS, TAP_MAX_MS);
+            cfg.wait_ms = CLAMP(saved.wait_ms, WAIT_MIN_MS, WAIT_MAX_MS);
+        }
+        return 0;
+    }
+
+    if (sub[0] == 's') {
+        int idx = atoi(&sub[1]);
+        static struct flask_macro_step steps[FLASK_MACROS_STEPS];
+        size_t n = len / sizeof(struct flask_macro_step);
+
+        if (idx < 0 || idx >= FLASK_MACROS_SLOTS || n == 0 || n > FLASK_MACROS_STEPS ||
+            len != n * sizeof(struct flask_macro_step)) {
+            LOG_WRN("flask/macros/%s ignored (len %d)", sub, (int)len);
+            return 0;
+        }
+        if (read_cb(cb_arg, steps, len) < 0) {
+            return -EIO;
+        }
+        for (size_t s = 0; s < n; s++) {
+            if (steps[s].action > FLASK_MACRO_ACTION_WAIT) {
+                steps[s].action = FLASK_MACRO_ACTION_EMPTY;
             }
         }
+        K_SPINLOCK(&cfg_lock) {
+            memcpy(cfg.steps[idx], steps, len);
+            memset(&cfg.steps[idx][n], 0,
+                   (FLASK_MACROS_STEPS - n) * sizeof(struct flask_macro_step));
+        }
+        return 0;
     }
-    return 0;
+    return -ENOENT;
 }
 
 static int flask_macros_init(void) {

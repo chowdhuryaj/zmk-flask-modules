@@ -37,6 +37,32 @@ config ZMK_BEHAVIOR_FLASK_AUTOSCROLL
       Keymap behavior driving the flask autoscroll processor:
       &asc ASC_UP / ASC_DOWN / ASC_JOG / ASC_STOP.
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_ACCEL := zmk,input-processor-flask-accel
+
+config ZMK_INPUT_PROCESSOR_FLASK_ACCEL
+    bool "Flask pointer acceleration input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_ACCEL))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Sigmoid-curve pointer acceleration — port of the Flask (QMK) pd_accel
+      module (drashna's pointing_device_accel). Scales REL_X/REL_Y in the
+      listener chain by a velocity-driven factor; takeoff/growth/offset/
+      limit are runtime-tunable over the Flask protocol (channel 0x10).
+
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP := zmk,input-processor-flask-scrollsnap
+
+config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP
+    bool "Flask scroll axis snap/lock input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Runtime-tunable port of kot149/zmk-scroll-snap: snaps slightly
+      diagonal wheel motion onto the dominant axis and can lock that axis
+      for a duration/event count. Every knob is live over the Flask
+      protocol (channel 0x26).
+
 DT_COMPAT_FLASK_RGB := flask,rgb
 
 config ZMK_FLASK_RGB
@@ -92,6 +118,25 @@ config ZMK_FLASK_COMBOS
       devicetree combos. Central-only on splits (no DT node — enable
       explicitly in the board .conf).
 
+config ZMK_FLASK_COMBOS_SLOTS
+    int "Runtime combo slots"
+    depends on ZMK_FLASK_COMBOS
+    range 1 64
+    default 64
+    help
+      How many runtime combos the table holds. Bounded by the matcher's
+      u64 candidate bitmask (64) and settings-partition budget — each live
+      slot persists as its own settings entry.
+
+config ZMK_FLASK_COMBOS_KEYS
+    int "Max key positions per combo"
+    depends on ZMK_FLASK_COMBOS
+    range 2 8
+    default 8
+    help
+      Positions one combo can bind (Vial caps this at 4; the 32-byte Flask
+      frame fits 8). Also sizes the capture buffer.
+
 config ZMK_FLASK_MACROS
     bool "Flask runtime macros"
     depends on SETTINGS
@@ -105,6 +150,24 @@ config ZMK_FLASK_MACROS
       protocol's play value. Central-only on splits (enable explicitly in
       the board .conf; the &fmac keymap node auto-enables only the
       behavior below).
+
+config ZMK_FLASK_MACROS_SLOTS
+    int "Runtime macro slots"
+    depends on ZMK_FLASK_MACROS
+    range 1 64
+    default 32
+    help
+      How many runtime macros the table holds. Each used slot persists as
+      its own settings entry — RAM and the settings partition are the only
+      real bounds.
+
+config ZMK_FLASK_MACROS_STEPS
+    int "Steps per macro slot"
+    depends on ZMK_FLASK_MACROS
+    range 1 128
+    default 32
+    help
+      Typed steps (tap/press/release/wait) one macro can hold.
 
 DT_COMPAT_ZMK_BEHAVIOR_FLASK_MACROS := zmk,behavior-flask-macros
 

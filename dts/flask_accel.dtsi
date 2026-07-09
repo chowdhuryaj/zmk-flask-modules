@@ -1,0 +1,20 @@
+/*
+ * Default flask_accel instance. Wire it into the cursor ball's listener
+ * chain from the consuming keymap (after gestures, before scalers):
+ *
+ *   #include <flask_accel.dtsi>
+ *   &flask_accel { cpi = <1600>; start-disabled; };
+ *   // in the cursor listener:
+ *   //   input-processors = <&zip_mouse_gesture &flask_accel &zip_xy_scaler 1 1 ...>;
+ *
+ * The processor scales REL_X/REL_Y in place (no swallow/re-emit), so no
+ * second listener is needed.
+ */
+
+/ {
+    flask_accel: flask_accel {
+        compatible = "zmk,input-processor-flask-accel";
+        #input-processor-cells = <0>;
+        status = "okay";
+    };
+};

@@ -29,8 +29,10 @@
 
 #include <zephyr/settings/settings.h>
 
-#define FLASK_MACROS_SLOTS 16
-#define FLASK_MACROS_STEPS 16
+/* Capacities are Kconfig-driven (ZMK is storage-bound, not Vial-bound);
+ * the wire advertises both so the app never hardcodes them. */
+#define FLASK_MACROS_SLOTS CONFIG_ZMK_FLASK_MACROS_SLOTS
+#define FLASK_MACROS_STEPS CONFIG_ZMK_FLASK_MACROS_STEPS
 
 /* Step actions. EMPTY ends playback — steps after the first empty never
  * run, so deleting a step from the app means compacting the tail up. */
@@ -72,10 +74,14 @@ int flask_macros_play(uint8_t slot);
 void flask_macros_stop(void);
 int flask_macros_playing_slot(void);
 
-/* Persist the live table (CMD_SAVE path; settings key "flask/macros"). */
+/* Persist the live table (CMD_SAVE path; settings subtree "flask/macros":
+ * "cfg" globals + one "s<idx>" used-steps-prefix entry per used slot,
+ * empties deleted). */
 int flask_macros_save(void);
 
 /* Restore hook — called from flask_proto.c's "flask" settings handler for
- * the "macros" leaf. Size/version mismatches are ignored (table stays
- * empty; defaults ARE empty). */
-int flask_macros_settings_restore(size_t len, settings_read_cb read_cb, void *cb_arg);
+ * every "macros..." entry; sub is the name past the subtree ("cfg",
+ * "s<idx>", NULL for the retired v1 whole-table blob). Size/version
+ * mismatches are ignored (table stays empty; defaults ARE empty). */
+int flask_macros_settings_restore(const char *sub, size_t len, settings_read_cb read_cb,
+                                  void *cb_arg);

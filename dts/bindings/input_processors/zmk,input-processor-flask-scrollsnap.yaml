@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MIT
+description: "Flask scroll axis snap/lock — runtime-tunable port of kot149/zmk-scroll-snap (Flask protocol channel 0x26)"
+
+compatible: "zmk,input-processor-flask-scrollsnap"
+
+include: ip_zero_param.yaml
+
+properties:
+  threshold-pct:
+    type: int
+    default: 63
+    description: "Axis share of recent motion that wins the snap, percent (50 = instant snap, 99 = almost never; clamped 50..99)"
+  samples:
+    type: int
+    default: 8
+    description: "Decision window size in wheel events (clamped 1..32)"
+  immediate-threshold:
+    type: int
+    default: 25
+    description: "Motion sum that forces a decision before the window fills (0 = wait for the window)"
+  lock-ms:
+    type: int
+    default: 250
+    description: "Hold the winning axis this long after the last agreeing event (0 = off)"
+  lock-events:
+    type: int
+    default: 0
+    description: "Hold the winning axis for this many events (0 = off)"
+  idle-reset-ms:
+    type: int
+    default: 300
+    description: "Pause that clears the window and any lock (0 = off)"
+  start-disabled:
+    type: boolean
+    description: "Boot with snapping off (runtime enable over the Flask protocol)"

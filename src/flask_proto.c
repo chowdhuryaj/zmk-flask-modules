@@ -35,6 +35,14 @@
 #include <flask_autoscroll/flask_autoscroll.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
+#include <flask_accel/flask_accel.h>
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
+#include <flask_scrollsnap/flask_scrollsnap.h>
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
 #include <flask_rgb/flask_rgb.h>
 #endif
@@ -70,8 +78,17 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * 0x03 RO u16, tap ms 0x04 / wait ms 0x05 u16, live state 0x06 (GET =
  * playing slot+1 or 0; SET nonzero plays slot v-1, 0 stops; never
  * persisted), step 0x10 payload-addressed [slot, step, action, param u32
- * BE]; SAVE persists via "flask/macros". */
-#define FLASK_PROTO_VERSION 8
+ * BE]; SAVE persists via "flask/macros". v9 (2026-07-09, parity round):
+ * (a) pointer accel channel 0x10 (flask_accel, QMK wire shape — enabled
+ * 0x01, takeoff 0x02, growth 0x03, offset 0x04 SIGNED, limit 0x05, all
+ * x100; SAVE via "flask/accel"); (b) scroll snap/lock channel 0x26
+ * (flask_scrollsnap — enabled 0x01, threshold pct 0x02, samples 0x03,
+ * immediate 0x04, lock ms 0x05, lock events 0x06, idle reset ms 0x07;
+ * SAVE via "flask/scrollsnap"); (c) rgbmap effect engine values 0x04-0x08
+ * (effect / speed / hue / sat / val); (d) combos keys-per-slot RO 0x04 and
+ * the slot frame sized by it ([slot, pos x KEYS, usage u32 BE]) — combos/
+ * macros capacities are Kconfig now and persist per-slot. */
+#define FLASK_PROTO_VERSION 9
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -83,17 +100,25 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* Channels (same numbering as the QMK families; 0x20-0x22 are NLKB16's —
  * stay clear so channel ids keep meaning one thing across the ecosystem) */
 #define CH_META 0x00
+#define CH_ACCEL 0x10 /* QMK accel channel — same wire shape (v9) */
 #define CH_DRAGSCROLL 0x15
 #define CH_AUTOSCROLL 0x1A
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
 #define CH_COMBOS 0x24
 #define CH_MACROS 0x25
+#define CH_SCROLLSNAP 0x26 /* ZMK-line: flask_scrollsnap (v9) */
 
-/* RGB map values (channel 0x21, QMK NLKB16 wire shape) */
+/* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
+ * imprint-line effect-engine additions, v9 — append-only ids) */
 #define RGBMAP_ENABLED 0x01
 #define RGBMAP_LAYERS 0x02 /* RO */
 #define RGBMAP_LEDS 0x03   /* RO */
+#define RGBMAP_EFFECT 0x04 /* 0 off / 1 solid / 2 breathe / 3 spectrum / 4 swirl */
+#define RGBMAP_EFFECT_SPEED 0x05
+#define RGBMAP_EFFECT_HUE 0x06
+#define RGBMAP_EFFECT_SAT 0x07
+#define RGBMAP_EFFECT_VAL 0x08
 #define RGBMAP_LED 0x10    /* payload-addressed: [layer, led, h, s, v] */
 #define RGBMAP_FILL 0x12   /* payload-addressed: [layer, h, s, v] */
 
@@ -104,7 +129,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define COMBOS_ENABLED 0x01
 #define COMBOS_SLOT_COUNT 0x02 /* RO */
 #define COMBOS_TIMEOUT 0x03    /* global candidate window, ms */
-#define COMBOS_SLOT 0x10       /* payload-addressed: [slot, pos x4, usage u32 BE] */
+#define COMBOS_KEYS 0x04       /* RO (v9) — positions per slot; sizes the slot frame */
+#define COMBOS_SLOT 0x10       /* payload-addressed: [slot, pos x KEYS, usage u32 BE] */
 
 /* Macros values (channel 0x25) */
 #define MACROS_ENABLED 0x01
@@ -138,6 +164,23 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define AS_STATE 0x05       /* live: GET = stepped level; SET stops */
 #define AS_STOP_ON_KEY 0x06
 
+/* Accel values — same wire vocabulary as the QMK families (pd_accel over
+ * mad_hid.c): x100 fixed-point floats, offset is SIGNED. */
+#define ACCEL_ENABLED 0x01
+#define ACCEL_TAKEOFF 0x02
+#define ACCEL_GROWTH 0x03
+#define ACCEL_OFFSET 0x04 /* i16 on the wire */
+#define ACCEL_LIMIT 0x05
+
+/* Scroll snap values (channel 0x26, ZMK line — no QMK equivalent) */
+#define SNAP_ENABLED 0x01
+#define SNAP_THRESHOLD 0x02 /* axis dominance percent, 50..99 */
+#define SNAP_SAMPLES 0x03
+#define SNAP_IMMEDIATE 0x04
+#define SNAP_LOCK_MS 0x05
+#define SNAP_LOCK_EVENTS 0x06
+#define SNAP_IDLE_RESET 0x07
+
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 struct flask_scroll_saved {
     uint8_t version;
@@ -156,6 +199,24 @@ struct flask_autoscroll_saved {
 /* v2: params struct lost jog_deadzone/jog_range — a v1 blob is a size
  * mismatch and is ignored (tunables reseed from DT defaults). */
 #define AUTOSCROLL_SETTINGS_VERSION 2
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
+struct flask_accel_saved {
+    uint8_t version;
+    struct flask_accel_params params;
+} __packed;
+
+#define ACCEL_SETTINGS_VERSION 1
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
+struct flask_scrollsnap_saved {
+    uint8_t version;
+    struct flask_scrollsnap_params params;
+} __packed;
+
+#define SCROLLSNAP_SETTINGS_VERSION 1
 #endif
 
 static void wr_u16(uint8_t *p, uint16_t v) {
@@ -222,6 +283,140 @@ static bool handle_keystate(uint8_t cmd, uint8_t value_id, uint8_t *payload,
     memcpy(payload, keystate_bitmap, MIN((size_t)KEYSTATE_BYTES, payload_len));
     return true;
 }
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
+static bool handle_accel(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_accel_params p;
+
+    if (flask_accel_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case ACCEL_ENABLED:
+            p.enabled = (v != 0);
+            break;
+        case ACCEL_TAKEOFF:
+            p.takeoff_x100 = v;
+            break;
+        case ACCEL_GROWTH:
+            p.growth_x100 = v;
+            break;
+        case ACCEL_OFFSET:
+            p.offset_x100 = (int16_t)v; /* signed on the wire */
+            break;
+        case ACCEL_LIMIT:
+            p.limit_x100 = v;
+            break;
+        default:
+            return false;
+        }
+        flask_accel_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_accel_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case ACCEL_ENABLED:
+        wr_u16(payload, p.enabled ? 1 : 0);
+        return true;
+    case ACCEL_TAKEOFF:
+        wr_u16(payload, p.takeoff_x100);
+        return true;
+    case ACCEL_GROWTH:
+        wr_u16(payload, p.growth_x100);
+        return true;
+    case ACCEL_OFFSET:
+        wr_u16(payload, (uint16_t)p.offset_x100);
+        return true;
+    case ACCEL_LIMIT:
+        wr_u16(payload, p.limit_x100);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
+static bool handle_scrollsnap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_scrollsnap_params p;
+
+    if (flask_scrollsnap_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case SNAP_ENABLED:
+            p.enabled = (v != 0);
+            break;
+        case SNAP_THRESHOLD:
+            p.threshold_pct = (uint8_t)MIN(v, 255);
+            break;
+        case SNAP_SAMPLES:
+            p.samples = (uint8_t)MIN(v, 255);
+            break;
+        case SNAP_IMMEDIATE:
+            p.immediate_thresh = v;
+            break;
+        case SNAP_LOCK_MS:
+            p.lock_ms = v;
+            break;
+        case SNAP_LOCK_EVENTS:
+            p.lock_events = v;
+            break;
+        case SNAP_IDLE_RESET:
+            p.idle_reset_ms = v;
+            break;
+        default:
+            return false;
+        }
+        flask_scrollsnap_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_scrollsnap_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case SNAP_ENABLED:
+        wr_u16(payload, p.enabled ? 1 : 0);
+        return true;
+    case SNAP_THRESHOLD:
+        wr_u16(payload, p.threshold_pct);
+        return true;
+    case SNAP_SAMPLES:
+        wr_u16(payload, p.samples);
+        return true;
+    case SNAP_IMMEDIATE:
+        wr_u16(payload, p.immediate_thresh);
+        return true;
+    case SNAP_LOCK_MS:
+        wr_u16(payload, p.lock_ms);
+        return true;
+    case SNAP_LOCK_EVENTS:
+        wr_u16(payload, p.lock_events);
+        return true;
+    case SNAP_IDLE_RESET:
+        wr_u16(payload, p.idle_reset_ms);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
@@ -373,6 +568,32 @@ static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         }
         wr_u16(payload, flask_rgb_total_leds());
         return true;
+    case RGBMAP_EFFECT:
+        if (cmd == CMD_SET) {
+            flask_rgb_set_effect((uint8_t)rd_u16(payload));
+        }
+        wr_u16(payload, flask_rgb_effect());
+        return true;
+    case RGBMAP_EFFECT_SPEED:
+        if (cmd == CMD_SET) {
+            flask_rgb_set_effect_speed((uint8_t)MIN(rd_u16(payload), 255));
+        }
+        wr_u16(payload, flask_rgb_effect_speed());
+        return true;
+    case RGBMAP_EFFECT_HUE:
+    case RGBMAP_EFFECT_SAT:
+    case RGBMAP_EFFECT_VAL: {
+        uint8_t hsv[3];
+        int idx = value_id - RGBMAP_EFFECT_HUE;
+
+        flask_rgb_effect_hsv(hsv);
+        if (cmd == CMD_SET) {
+            hsv[idx] = (uint8_t)MIN(rd_u16(payload), 255);
+            flask_rgb_set_effect_hsv(hsv);
+        }
+        wr_u16(payload, hsv[idx]);
+        return true;
+    }
     case RGBMAP_LED: {
         if (payload_len < 5) {
             return false;
@@ -421,8 +642,18 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         }
         wr_u16(payload, flask_combos_timeout_ms());
         return true;
+    case COMBOS_KEYS:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, FLASK_COMBOS_KEYS);
+        return true;
     case COMBOS_SLOT: {
-        if (payload_len < 1 + FLASK_COMBOS_KEYS + 4) {
+        /* Frame is sized by COMBOS_KEYS (the app reads it first): usage
+         * sits right after the position block. */
+        const size_t u = 1 + FLASK_COMBOS_KEYS;
+
+        if (payload_len < u + 4) {
             return false;
         }
         uint8_t slot = payload[0];
@@ -430,8 +661,8 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
 
         if (cmd == CMD_SET) {
             memcpy(s.pos, &payload[1], FLASK_COMBOS_KEYS);
-            s.usage = ((uint32_t)payload[5] << 24) | ((uint32_t)payload[6] << 16) |
-                      ((uint32_t)payload[7] << 8) | payload[8];
+            s.usage = ((uint32_t)payload[u] << 24) | ((uint32_t)payload[u + 1] << 16) |
+                      ((uint32_t)payload[u + 2] << 8) | payload[u + 3];
             if (flask_combos_slot_set(slot, &s) != 0) {
                 return false;
             }
@@ -440,10 +671,10 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
             return false;
         }
         memcpy(&payload[1], s.pos, FLASK_COMBOS_KEYS);
-        payload[5] = s.usage >> 24;
-        payload[6] = s.usage >> 16;
-        payload[7] = s.usage >> 8;
-        payload[8] = s.usage;
+        payload[u] = s.usage >> 24;
+        payload[u + 1] = s.usage >> 16;
+        payload[u + 2] = s.usage >> 8;
+        payload[u + 3] = s.usage;
         return true;
     }
     default:
@@ -567,6 +798,36 @@ static bool handle_save(uint8_t channel) {
         return true;
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
+    case CH_ACCEL: {
+        struct flask_accel_saved saved = {.version = ACCEL_SETTINGS_VERSION};
+
+        if (flask_accel_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/accel", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/accel settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
+    case CH_SCROLLSNAP: {
+        struct flask_scrollsnap_saved saved = {.version = SCROLLSNAP_SETTINGS_VERSION};
+
+        if (flask_scrollsnap_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/scrollsnap", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/scrollsnap settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     case CH_RGBMAP:
         return flask_rgb_save() == 0;
@@ -619,6 +880,16 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
         case CH_AUTOSCROLL:
             ok = handle_autoscroll(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
+        case CH_ACCEL:
+            ok = handle_accel(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
+        case CH_SCROLLSNAP:
+            ok = handle_scrollsnap(cmd, value_id, payload);
             break;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
@@ -708,19 +979,75 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         return 0;
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
+    if (settings_name_steq(name, "accel", NULL)) {
+        struct flask_accel_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/accel settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != ACCEL_SETTINGS_VERSION) {
+            LOG_WRN("flask/accel settings version %d ignored", saved.version);
+            return 0;
+        }
+        if (flask_accel_params_set(&saved.params) < 0) {
+            LOG_WRN("flask/accel restore: processor not ready");
+        }
+        return 0;
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
+    if (settings_name_steq(name, "scrollsnap", NULL)) {
+        struct flask_scrollsnap_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/scrollsnap settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != SCROLLSNAP_SETTINGS_VERSION) {
+            LOG_WRN("flask/scrollsnap settings version %d ignored", saved.version);
+            return 0;
+        }
+        if (flask_scrollsnap_params_set(&saved.params) < 0) {
+            LOG_WRN("flask/scrollsnap restore: processor not ready");
+        }
+        return 0;
+    }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     if (settings_name_steq(name, "rgbmap", NULL)) {
         return flask_rgb_settings_restore(len, read_cb, cb_arg);
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
-    if (settings_name_steq(name, "combos", NULL)) {
-        return flask_combos_settings_restore(len, read_cb, cb_arg);
+    {
+        const char *sub = NULL;
+
+        /* Subtree since v9: "combos/cfg" + "combos/s<idx>" (sub = NULL for
+         * the retired v1 whole-table leaf — the module logs and ignores). */
+        if (settings_name_steq(name, "combos", &sub)) {
+            return flask_combos_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                 cb_arg);
+        }
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
-    if (settings_name_steq(name, "macros", NULL)) {
-        return flask_macros_settings_restore(len, read_cb, cb_arg);
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "macros", &sub)) {
+            return flask_macros_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                 cb_arg);
+        }
     }
 #endif
     return -ENOENT;

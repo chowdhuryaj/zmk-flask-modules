@@ -57,6 +57,7 @@ static bool frgb_enabled_val;
 static bool frgb_send_fill_pending;
 static uint8_t frgb_fill_layer;
 static uint8_t frgb_fill_hsv[3];
+static bool frgb_send_effect_pending;
 static bool frgb_bulk_active;
 static uint8_t frgb_bulk_layer;
 static uint16_t frgb_bulk_led;
@@ -87,7 +88,7 @@ static void frgb_tx_drain(struct k_work *work) {
         bool sent = false;
 
         /* latest-state flags first: enabled, then layer state */
-        bool do_enabled = false, do_layers = false, do_fill = false;
+        bool do_enabled = false, do_layers = false, do_fill = false, do_effect = false;
         bool enabled_val = false;
         uint32_t layers_val = 0;
         uint8_t fill_layer = 0, fill_hsv[3];
@@ -106,6 +107,9 @@ static void frgb_tx_drain(struct k_work *work) {
                 fill_layer = frgb_fill_layer;
                 memcpy(fill_hsv, frgb_fill_hsv, 3);
                 frgb_send_fill_pending = false;
+            } else if (frgb_send_effect_pending) {
+                do_effect = true;
+                frgb_send_effect_pending = false;
             }
         }
 
@@ -142,6 +146,19 @@ static void frgb_tx_drain(struct k_work *work) {
                     frgb_fill_layer = fill_layer;
                     memcpy(frgb_fill_hsv, fill_hsv, 3);
                 }
+            }
+            sent = true;
+        } else if (do_effect) {
+            /* Snapshot at send time — phase is a live clock, and a stale
+             * anchor defeats the point of sending one. */
+            uint16_t phase;
+
+            buf[0] = FRGB_OP_EFFECT;
+            flask_rgb_effect_snapshot(&buf[1], &buf[2], &buf[3], &phase);
+            sys_put_le16(phase, &buf[6]);
+            err = frgb_wwr(buf, 8);
+            if (err) {
+                K_SPINLOCK(&frgb_tx_lock) { frgb_send_effect_pending = true; }
             }
             sent = true;
         } else {
@@ -222,6 +239,11 @@ void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
     k_work_schedule(&frgb_tx_work, K_NO_WAIT);
 }
 
+void flask_rgb_split_send_effect(void) {
+    K_SPINLOCK(&frgb_tx_lock) { frgb_send_effect_pending = true; }
+    k_work_schedule(&frgb_tx_work, K_NO_WAIT);
+}
+
 void flask_rgb_split_send_led(uint8_t layer, uint16_t led, const uint8_t hsv[3]) {
     struct frgb_led_frame f = {.layer = layer, .led = led};
 
@@ -273,8 +295,9 @@ static uint8_t frgb_discover_func(struct bt_conn *conn, const struct bt_gatt_att
     frgb_link.ready = true;
     LOG_INF("flask_rgb: peripheral characteristic found (handle %u)", frgb_link.handle);
 
-    /* Rehydrate the peripheral: current enabled + layer state + full map. */
+    /* Rehydrate the peripheral: enabled + effect + layer state + full map. */
     flask_rgb_split_send_enabled(flask_rgb_enabled());
+    flask_rgb_split_send_effect();
     flask_rgb_bulk_resync();
     return BT_GATT_ITER_STOP;
 }

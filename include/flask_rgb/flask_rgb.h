@@ -38,6 +38,27 @@ int flask_rgb_fill(uint8_t layer, const uint8_t hsv[3]);
 bool flask_rgb_enabled(void);
 void flask_rgb_set_enabled(bool on);
 
+/* Whole-strip effect engine (channel 0x21 values 0x04-0x08, proto v9).
+ * Painted map keys (V > 0) OVERLAY the effect — same layering the QMK
+ * NLKB16 tab describes. Effects: 0 off, 1 solid, 2 breathe, 3 spectrum,
+ * 4 swirl. Speed 1-255 scales the animation clock; the effect HSV is the
+ * base color (solid/breathe) or the S/V floor (spectrum/swirl). */
+enum flask_rgb_effect {
+    FLASK_RGB_EFFECT_OFF = 0,
+    FLASK_RGB_EFFECT_SOLID = 1,
+    FLASK_RGB_EFFECT_BREATHE = 2,
+    FLASK_RGB_EFFECT_SPECTRUM = 3,
+    FLASK_RGB_EFFECT_SWIRL = 4,
+};
+#define FLASK_RGB_EFFECT_MAX FLASK_RGB_EFFECT_SWIRL
+
+uint8_t flask_rgb_effect(void);
+void flask_rgb_set_effect(uint8_t effect);
+uint8_t flask_rgb_effect_speed(void);
+void flask_rgb_set_effect_speed(uint8_t speed);
+void flask_rgb_effect_hsv(uint8_t hsv[3]);
+void flask_rgb_set_effect_hsv(const uint8_t hsv[3]);
+
 /* Persist the live map + enabled flag (central; CMD_SAVE path). */
 int flask_rgb_save(void);
 
@@ -52,6 +73,11 @@ void flask_rgb_sync_layers(uint32_t layer_bitmap);
 void flask_rgb_sync_led(uint8_t layer, uint16_t led, const uint8_t hsv[3]);
 void flask_rgb_sync_enabled(bool on);
 void flask_rgb_sync_fill(uint8_t layer, const uint8_t hsv[3]);
+void flask_rgb_sync_effect(uint8_t effect, uint8_t speed, const uint8_t hsv[3], uint16_t phase);
+
+/* Effect state snapshot for the central's egress (params + current phase,
+ * so the peripheral's animation clock re-anchors on every sync). */
+void flask_rgb_effect_snapshot(uint8_t *effect, uint8_t *speed, uint8_t hsv[3], uint16_t *phase);
 
 /* Central egress: implemented by flask_rgb_split_central.c (weak no-ops
  * otherwise) — forward state to the peripheral. */
@@ -59,6 +85,7 @@ void flask_rgb_split_send_layers(uint32_t layer_bitmap);
 void flask_rgb_split_send_led(uint8_t layer, uint16_t led, const uint8_t hsv[3]);
 void flask_rgb_split_send_enabled(bool on);
 void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]);
+void flask_rgb_split_send_effect(void);
 
 /* Full-map walk for the connect-time bulk sync. */
 void flask_rgb_bulk_resync(void);

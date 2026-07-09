@@ -67,6 +67,11 @@ static ssize_t frgb_chr_write(struct bt_conn *conn, const struct bt_gatt_attr *a
             }
         }
         break;
+    case FRGB_OP_EFFECT:
+        if (len >= 8) {
+            flask_rgb_sync_effect(p[1], p[2], &p[3], sys_get_le16(&p[6]));
+        }
+        break;
     default:
         break;
     }

@@ -13,6 +13,8 @@
  *   0x03 enabled: [op, 0|1]                            (2 B)
  *   0x04 fill:    [op, layer, h, s, v]                 (5 B)
  *   0x05 chunk:   [op, layer, start LE u16, n, n×hsv]  (5 + 3n B, n ≤ 4)
+ *   0x06 effect:  [op, effect, speed, h, s, v, phase LE u16]  (8 B)
+ *                 (phase re-anchors the peripheral's animation clock)
  *
  * SPDX-License-Identifier: MIT
  */
@@ -31,5 +33,6 @@
 #define FRGB_OP_ENABLED 0x03
 #define FRGB_OP_FILL 0x04
 #define FRGB_OP_CHUNK 0x05
+#define FRGB_OP_EFFECT 0x06
 
 #define FRGB_CHUNK_MAX 4

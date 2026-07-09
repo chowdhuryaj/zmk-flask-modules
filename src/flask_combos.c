@@ -31,6 +31,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -54,9 +56,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TIMEOUT_DEFAULT_MS 50
 
 /* How many runtime combos can be held down at once. */
-#define MAX_ACTIVE 4
+#define MAX_ACTIVE 8
 
-BUILD_ASSERT(FLASK_COMBOS_SLOTS <= 32, "candidate set is a single u32 bitmask");
+BUILD_ASSERT(FLASK_COMBOS_SLOTS <= 64, "candidate set is a single u64 bitmask");
+
+static inline int popcount64(uint64_t v) { return __builtin_popcountll(v); }
 
 /* --- config (spinlocked: raw-HID writes race the matcher) --- */
 
@@ -72,7 +76,7 @@ static struct {
 /* Derived: per-position bitmask of live slots + per-slot key counts.
  * Rebuilt on every table edit; only LIVE slots (usage set, >= 2 keys) are
  * entered, so the matcher can trust any lookup hit. */
-static uint32_t lookup[ZMK_KEYMAP_LEN];
+static uint64_t lookup[ZMK_KEYMAP_LEN];
 static uint8_t slot_len[FLASK_COMBOS_SLOTS];
 
 static struct k_spinlock cfg_lock;
@@ -103,7 +107,7 @@ static void rebuild_lookup(void) {
         slot_len[i] = len;
         for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
             if (s->pos[k] != FLASK_COMBOS_POS_NONE) {
-                lookup[s->pos[k]] |= BIT(i);
+                lookup[s->pos[k]] |= BIT64(i);
             }
         }
     }
@@ -113,7 +117,7 @@ static void rebuild_lookup(void) {
 
 static struct zmk_position_state_changed_event pressed[FLASK_COMBOS_KEYS];
 static uint8_t pressed_count;
-static uint32_t candidates;
+static uint64_t candidates;
 static int fully_pressed = -1;
 
 struct active_rt {
@@ -128,8 +132,8 @@ static struct active_rt actives[MAX_ACTIVE];
 static struct k_work_delayable timeout_task;
 static int64_t timeout_at;
 
-static int setup_candidates(uint32_t position, uint32_t *out) {
-    uint32_t set = 0;
+static int setup_candidates(uint32_t position, uint64_t *out) {
+    uint64_t set = 0;
 
     K_SPINLOCK(&cfg_lock) {
         if (cfg.enabled && position < ZMK_KEYMAP_LEN) {
@@ -137,11 +141,11 @@ static int setup_candidates(uint32_t position, uint32_t *out) {
         }
     }
     *out = set;
-    return POPCOUNT(set);
+    return popcount64(set);
 }
 
 static int filter_candidates(uint32_t position) {
-    uint32_t mask = 0;
+    uint64_t mask = 0;
 
     K_SPINLOCK(&cfg_lock) {
         if (position < ZMK_KEYMAP_LEN) {
@@ -149,7 +153,7 @@ static int filter_candidates(uint32_t position) {
         }
     }
     candidates &= mask;
-    return POPCOUNT(candidates);
+    return popcount64(candidates);
 }
 
 static int find_fully_pressed(void) {
@@ -157,7 +161,7 @@ static int find_fully_pressed(void) {
 
     K_SPINLOCK(&cfg_lock) {
         for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
-            if ((candidates & BIT(i)) && slot_len[i] == pressed_count) {
+            if ((candidates & BIT64(i)) && slot_len[i] == pressed_count) {
                 found = i;
                 break;
             }
@@ -447,64 +451,117 @@ int flask_combos_slot_set(uint8_t idx, const struct flask_combo_slot *in) {
     return 0;
 }
 
-/* --- persistence (settings key "flask/combos") --- */
+/* --- persistence (settings subtree "flask/combos") ---
+ *
+ * v2 layout (2026-07-09, capacities round): one entry per USED slot —
+ * "flask/combos/s<idx>" holds the raw slot struct, "flask/combos/cfg" the
+ * globals. Empty slots are deleted. NVS caps a single entry near its
+ * sector size, so the old whole-table blob stopped scaling the moment the
+ * table grew past ~4 KB; per-slot entries scale to whatever the partition
+ * holds. The v1 blob (exact "flask/combos" leaf) is ignored on load — it
+ * never reached hardware. */
 
-struct flask_combos_saved {
+struct flask_combos_saved_cfg {
     uint8_t version;
     uint8_t enabled;
     uint16_t timeout_ms;
-    struct flask_combo_slot slots[FLASK_COMBOS_SLOTS];
 } __packed;
 
-#define COMBOS_SETTINGS_VERSION 1
+#define COMBOS_SETTINGS_VERSION 2
+
+static bool slot_is_empty(const struct flask_combo_slot *s) {
+    if (s->usage != 0) {
+        return false;
+    }
+    for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
+        if (s->pos[k] != FLASK_COMBOS_POS_NONE) {
+            return false;
+        }
+    }
+    return true;
+}
 
 int flask_combos_save(void) {
-    struct flask_combos_saved saved = {.version = COMBOS_SETTINGS_VERSION};
+    struct flask_combos_saved_cfg saved = {.version = COMBOS_SETTINGS_VERSION};
+    struct flask_combo_slot slots[FLASK_COMBOS_SLOTS];
 
     K_SPINLOCK(&cfg_lock) {
         saved.enabled = cfg.enabled ? 1 : 0;
         saved.timeout_ms = cfg.timeout_ms;
-        memcpy(saved.slots, cfg.slots, sizeof(saved.slots));
+        memcpy(slots, cfg.slots, sizeof(slots));
     }
 
-    int err = settings_save_one("flask/combos", &saved, sizeof(saved));
+    int err = settings_save_one("flask/combos/cfg", &saved, sizeof(saved));
 
     if (err) {
-        LOG_ERR("flask/combos settings save failed: %d", err);
+        LOG_ERR("flask/combos/cfg settings save failed: %d", err);
         return err;
+    }
+
+    for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
+        char key[24];
+
+        snprintf(key, sizeof(key), "flask/combos/s%d", i);
+        err = slot_is_empty(&slots[i]) ? settings_delete(key)
+                                       : settings_save_one(key, &slots[i], sizeof(slots[i]));
+        if (err) {
+            LOG_ERR("%s settings save failed: %d", key, err);
+            return err;
+        }
     }
     return 0;
 }
 
-int flask_combos_settings_restore(size_t len, settings_read_cb read_cb, void *cb_arg) {
-    struct flask_combos_saved saved;
-
-    if (len != sizeof(saved)) {
-        LOG_WRN("flask/combos settings size mismatch (%d != %d)", (int)len, (int)sizeof(saved));
-        return -EINVAL;
-    }
-    if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
-        return -EIO;
-    }
-    if (saved.version != COMBOS_SETTINGS_VERSION) {
-        LOG_WRN("flask/combos settings version %d ignored", saved.version);
+/* Restore one entry of the "flask/combos" subtree; sub is the name past
+ * the subtree ("cfg", "s<idx>", or NULL for the retired v1 blob leaf). */
+int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb read_cb,
+                                  void *cb_arg) {
+    if (sub == NULL) {
+        LOG_WRN("flask/combos v1 blob ignored (per-slot layout since v2)");
         return 0;
     }
 
-    K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = saved.enabled != 0;
-        cfg.timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
-        for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
-            cfg.slots[i] = saved.slots[i];
-            for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
-                if (cfg.slots[i].pos[k] >= ZMK_KEYMAP_LEN) {
-                    cfg.slots[i].pos[k] = FLASK_COMBOS_POS_NONE;
-                }
+    if (strcmp(sub, "cfg") == 0) {
+        struct flask_combos_saved_cfg saved;
+
+        if (len != sizeof(saved) || read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            LOG_WRN("flask/combos/cfg unreadable (len %d)", (int)len);
+            return 0;
+        }
+        if (saved.version != COMBOS_SETTINGS_VERSION) {
+            LOG_WRN("flask/combos/cfg version %d ignored", saved.version);
+            return 0;
+        }
+        K_SPINLOCK(&cfg_lock) {
+            cfg.enabled = saved.enabled != 0;
+            cfg.timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+        }
+        return 0;
+    }
+
+    if (sub[0] == 's') {
+        int idx = atoi(&sub[1]);
+        struct flask_combo_slot s;
+
+        if (idx < 0 || idx >= FLASK_COMBOS_SLOTS || len != sizeof(s)) {
+            LOG_WRN("flask/combos/%s ignored (len %d)", sub, (int)len);
+            return 0;
+        }
+        if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
+            return -EIO;
+        }
+        for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
+            if (s.pos[k] >= ZMK_KEYMAP_LEN) {
+                s.pos[k] = FLASK_COMBOS_POS_NONE;
             }
         }
-        rebuild_lookup();
+        K_SPINLOCK(&cfg_lock) {
+            cfg.slots[idx] = s;
+            rebuild_lookup();
+        }
+        return 0;
     }
-    return 0;
+    return -ENOENT;
 }
 
 static int flask_combos_init(void) {

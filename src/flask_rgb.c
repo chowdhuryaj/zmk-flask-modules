@@ -62,8 +62,24 @@ static bool frgb_enabled = true;
 static uint8_t frgb_layer;      /* rendered layer (central: mirrors keymap) */
 static bool frgb_awake = true;  /* activity gate */
 
+/* Whole-strip effect (v9): painted map keys overlay it. The phase clock
+ * advances by `speed` per animation tick; both halves run the same clock
+ * and the central re-anchors the peripheral's phase on every effect sync. */
+static uint8_t frgb_effect;         /* enum flask_rgb_effect */
+static uint8_t frgb_effect_speed = 128;
+static uint8_t frgb_effect_col[3] = {0, 255, 120};
+static uint16_t frgb_phase;
+
 static struct led_rgb frgb_pixels[FRGB_LOCAL];
 static struct k_work frgb_render_work;
+static struct k_work_delayable frgb_anim_work;
+
+#define FRGB_ANIM_TICK_MS 40 /* 25 fps */
+
+static bool frgb_effect_animates(uint8_t effect) {
+    return effect == FLASK_RGB_EFFECT_BREATHE || effect == FLASK_RGB_EFFECT_SPECTRUM ||
+           effect == FLASK_RGB_EFFECT_SWIRL;
+}
 
 /* --- weak split egress: overridden by flask_rgb_split_central.c --- */
 
@@ -78,6 +94,7 @@ __weak void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
     ARG_UNUSED(layer);
     ARG_UNUSED(hsv);
 }
+__weak void flask_rgb_split_send_effect(void) {}
 __weak void flask_rgb_bulk_resync(void) {}
 
 /* --- HSV (0-255 each, QMK convention) → led_rgb --- */
@@ -111,6 +128,33 @@ static struct led_rgb frgb_hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v) {
 
 /* --- render --- */
 
+/* Callers hold frgb_lock. Effect color for one GLOBAL led index (global so
+ * the swirl rainbow lines up across the split). */
+static struct led_rgb frgb_effect_pixel(uint16_t global_led) {
+    uint8_t h = frgb_effect_col[0], s = frgb_effect_col[1], v = frgb_effect_col[2];
+    uint8_t p = frgb_phase >> 8;
+
+    switch (frgb_effect) {
+    case FLASK_RGB_EFFECT_SOLID:
+        break;
+    case FLASK_RGB_EFFECT_BREATHE: {
+        uint8_t tri = p < 128 ? p * 2 : (255 - p) * 2;
+
+        v = ((uint16_t)v * tri) >> 8;
+        break;
+    }
+    case FLASK_RGB_EFFECT_SPECTRUM:
+        h = p;
+        break;
+    case FLASK_RGB_EFFECT_SWIRL:
+        h = p + (uint8_t)(((uint32_t)global_led * 255) / FRGB_TOTAL);
+        break;
+    default:
+        return (struct led_rgb){0};
+    }
+    return v ? frgb_hsv_to_rgb(h, s, v) : (struct led_rgb){0};
+}
+
 static void frgb_render(struct k_work *work) {
     ARG_UNUSED(work);
 
@@ -123,9 +167,14 @@ static void frgb_render(struct k_work *work) {
         for (int i = 0; i < FRGB_LOCAL; i++) {
             const uint8_t *hsv = frgb_map[layer][FRGB_OFFSET + i];
 
-            frgb_pixels[i] = (dark || hsv[2] == 0)
-                                 ? (struct led_rgb){0}
-                                 : frgb_hsv_to_rgb(hsv[0], hsv[1], hsv[2]);
+            if (dark) {
+                frgb_pixels[i] = (struct led_rgb){0};
+            } else if (hsv[2] != 0) {
+                /* painted map key overlays the effect */
+                frgb_pixels[i] = frgb_hsv_to_rgb(hsv[0], hsv[1], hsv[2]);
+            } else {
+                frgb_pixels[i] = frgb_effect_pixel(FRGB_OFFSET + i);
+            }
         }
     }
 
@@ -137,6 +186,37 @@ static void frgb_render(struct k_work *work) {
 }
 
 static void frgb_schedule_render(void) { k_work_submit(&frgb_render_work); }
+
+/* Animation clock: advance the phase and re-render while an animated effect
+ * is visible; stops itself otherwise (any effect/enable/wake change calls
+ * frgb_anim_kick to restart it). */
+static void frgb_anim_tick(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    bool running;
+
+    K_SPINLOCK(&frgb_lock) {
+        running = frgb_enabled && frgb_awake && frgb_effect_animates(frgb_effect);
+        if (running) {
+            frgb_phase += frgb_effect_speed;
+        }
+    }
+    if (running) {
+        frgb_schedule_render();
+        k_work_schedule(&frgb_anim_work, K_MSEC(FRGB_ANIM_TICK_MS));
+    }
+}
+
+static void frgb_anim_kick(void) {
+    bool running;
+
+    K_SPINLOCK(&frgb_lock) {
+        running = frgb_enabled && frgb_awake && frgb_effect_animates(frgb_effect);
+    }
+    if (running) {
+        k_work_schedule(&frgb_anim_work, K_MSEC(FRGB_ANIM_TICK_MS));
+    }
+}
 
 /* --- public map API --- */
 
@@ -182,6 +262,48 @@ void flask_rgb_set_enabled(bool on) {
     K_SPINLOCK(&frgb_lock) { frgb_enabled = on; }
     flask_rgb_split_send_enabled(on);
     frgb_schedule_render();
+    frgb_anim_kick();
+}
+
+/* --- effect API (channel 0x21 values 0x04-0x08) --- */
+
+uint8_t flask_rgb_effect(void) { return frgb_effect; }
+
+void flask_rgb_set_effect(uint8_t effect) {
+    K_SPINLOCK(&frgb_lock) {
+        frgb_effect = MIN(effect, FLASK_RGB_EFFECT_MAX);
+        frgb_phase = 0;
+    }
+    flask_rgb_split_send_effect();
+    frgb_schedule_render();
+    frgb_anim_kick();
+}
+
+uint8_t flask_rgb_effect_speed(void) { return frgb_effect_speed; }
+
+void flask_rgb_set_effect_speed(uint8_t speed) {
+    K_SPINLOCK(&frgb_lock) { frgb_effect_speed = MAX(speed, 1); }
+    flask_rgb_split_send_effect();
+}
+
+void flask_rgb_effect_hsv(uint8_t hsv[3]) {
+    K_SPINLOCK(&frgb_lock) { memcpy(hsv, frgb_effect_col, 3); }
+}
+
+void flask_rgb_set_effect_hsv(const uint8_t hsv[3]) {
+    K_SPINLOCK(&frgb_lock) { memcpy(frgb_effect_col, hsv, 3); }
+    flask_rgb_split_send_effect();
+    frgb_schedule_render();
+}
+
+void flask_rgb_effect_snapshot(uint8_t *effect, uint8_t *speed, uint8_t hsv[3],
+                               uint16_t *phase) {
+    K_SPINLOCK(&frgb_lock) {
+        *effect = frgb_effect;
+        *speed = frgb_effect_speed;
+        memcpy(hsv, frgb_effect_col, 3);
+        *phase = frgb_phase;
+    }
 }
 
 /* --- peripheral ingest (GATT write handler → here) --- */
@@ -224,6 +346,18 @@ void flask_rgb_sync_fill(uint8_t layer, const uint8_t hsv[3]) {
     frgb_schedule_render();
 }
 
+void flask_rgb_sync_effect(uint8_t effect, uint8_t speed, const uint8_t hsv[3],
+                           uint16_t phase) {
+    K_SPINLOCK(&frgb_lock) {
+        frgb_effect = MIN(effect, FLASK_RGB_EFFECT_MAX);
+        frgb_effect_speed = MAX(speed, 1);
+        memcpy(frgb_effect_col, hsv, 3);
+        frgb_phase = phase; /* re-anchor: halves animate in step */
+    }
+    frgb_schedule_render();
+    frgb_anim_kick();
+}
+
 /* --- persistence (central; settings key "flask/rgbmap") --- */
 
 struct flask_rgb_saved_hdr {
@@ -231,9 +365,13 @@ struct flask_rgb_saved_hdr {
     uint8_t layers;
     uint16_t total;
     uint8_t enabled;
+    /* v2 (proto v9): effect engine */
+    uint8_t effect;
+    uint8_t effect_speed;
+    uint8_t effect_hsv[3];
 } __packed;
 
-#define FLASK_RGB_SETTINGS_VERSION 1
+#define FLASK_RGB_SETTINGS_VERSION 2
 
 struct flask_rgb_saved {
     struct flask_rgb_saved_hdr hdr;
@@ -248,8 +386,13 @@ int flask_rgb_save(void) {
         .layers = FRGB_LAYERS,
         .total = FRGB_TOTAL,
         .enabled = frgb_enabled ? 1 : 0,
+        .effect = frgb_effect,
+        .effect_speed = frgb_effect_speed,
     };
-    K_SPINLOCK(&frgb_lock) { memcpy(saved.map, frgb_map, sizeof(saved.map)); }
+    K_SPINLOCK(&frgb_lock) {
+        memcpy(saved.hdr.effect_hsv, frgb_effect_col, 3);
+        memcpy(saved.map, frgb_map, sizeof(saved.map));
+    }
 
     int err = settings_save_one("flask/rgbmap", &saved, sizeof(saved));
 
@@ -259,7 +402,9 @@ int flask_rgb_save(void) {
     return err;
 }
 
-/* Restore entry — called from flask_proto.c's "flask" settings handler. */
+/* Restore entry — called from flask_proto.c's "flask" settings handler.
+ * v1 blobs (no effect fields) are a size mismatch and reseed dark — they
+ * never reached benched hardware. */
 int flask_rgb_settings_restore(size_t len, settings_read_cb read_cb, void *cb_arg) {
     static struct flask_rgb_saved saved;
 
@@ -278,8 +423,12 @@ int flask_rgb_settings_restore(size_t len, settings_read_cb read_cb, void *cb_ar
     K_SPINLOCK(&frgb_lock) {
         memcpy(frgb_map, saved.map, sizeof(frgb_map));
         frgb_enabled = saved.hdr.enabled != 0;
+        frgb_effect = MIN(saved.hdr.effect, FLASK_RGB_EFFECT_MAX);
+        frgb_effect_speed = MAX(saved.hdr.effect_speed, 1);
+        memcpy(frgb_effect_col, saved.hdr.effect_hsv, 3);
     }
     frgb_schedule_render();
+    frgb_anim_kick();
     return 0;
 }
 
@@ -309,6 +458,7 @@ static int frgb_activity_listener(const zmk_event_t *eh) {
     }
     K_SPINLOCK(&frgb_lock) { frgb_awake = (ev->state == ZMK_ACTIVITY_ACTIVE); }
     frgb_schedule_render();
+    frgb_anim_kick();
     return ZMK_EV_EVENT_BUBBLE;
 }
 
@@ -319,6 +469,7 @@ ZMK_SUBSCRIPTION(flask_rgb_activity, zmk_activity_state_changed);
 
 static int flask_rgb_init(void) {
     k_work_init(&frgb_render_work, frgb_render);
+    k_work_init_delayable(&frgb_anim_work, frgb_anim_tick);
     if (!device_is_ready(frgb_strip)) {
         LOG_ERR("flask_rgb: LED strip not ready");
         return -ENODEV;

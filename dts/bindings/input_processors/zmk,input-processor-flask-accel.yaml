@@ -1,0 +1,30 @@
+description: "Flask pointer acceleration — drashna sigmoid curve, runtime-tunable over the Flask protocol (channel 0x10)"
+
+compatible: "zmk,input-processor-flask-accel"
+
+include: ip_zero_param.yaml
+
+properties:
+  takeoff:
+    type: int
+    default: 200
+    description: "Curve steepness K, x100 (default 2.0; clamped 0.5..10)"
+  growth-rate:
+    type: int
+    default: 25
+    description: "Growth rate G, x100 (default 0.25; clamped 0..2)"
+  offset:
+    type: int
+    default: 220
+    description: "Sigmoid midpoint S, x100, signed (default 2.2; clamped -10..10)"
+  limit:
+    type: int
+    default: 20
+    description: "Lower asymptote M, x100 (default 0.2; clamped 0..1)"
+  cpi:
+    type: int
+    default: 1600
+    description: "Sensor CPI used to normalize velocity (dpi-correction = 1000/cpi)"
+  start-disabled:
+    type: boolean
+    description: "Boot with acceleration off (runtime enable over the Flask protocol)"
