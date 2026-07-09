@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "Flask runtime-macro trigger behavior. Param selects the macro slot
+  (0-15); press plays that slot's live-editable step table (edited over
+  the Flask protocol, channel 0x25)."
+
+compatible: "zmk,behavior-flask-macros"
+
+properties:
+  display-name:
+    type: string
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+
+binding-cells:
+  - param1

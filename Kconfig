@@ -91,3 +91,26 @@ config ZMK_FLASK_COMBOS
       no combo RPC — this module is the live-editing path; it coexists with
       devicetree combos. Central-only on splits (no DT node — enable
       explicitly in the board .conf).
+
+config ZMK_FLASK_MACROS
+    bool "Flask runtime macros"
+    depends on SETTINGS
+    help
+      Runtime-editable macros (the Vial dynamic-macros analog): 16 slots of
+      up to 16 tap/press/release/wait steps raising encoded
+      keycode+modifier usages, edited live over the Flask protocol
+      (channel 0x25) and persisted via settings. ZMK's devicetree macros
+      are const config and ZMK Studio has no macro RPC — this module is
+      the live-editing path. Triggered by the &fmac behavior or the
+      protocol's play value. Central-only on splits (enable explicitly in
+      the board .conf; the &fmac keymap node auto-enables only the
+      behavior below).
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_MACROS := zmk,behavior-flask-macros
+
+config ZMK_BEHAVIOR_FLASK_MACROS
+    bool "Flask macro behavior (&fmac)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_MACROS))
+    depends on ZMK_FLASK_MACROS
+    help
+      Keymap behavior playing a flask_macros slot: &fmac <slot>.

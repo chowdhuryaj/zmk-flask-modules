@@ -43,6 +43,10 @@
 #include <flask_combos/flask_combos.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+#include <flask_macros/flask_macros.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -61,8 +65,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * v7 (2026-07-09): runtime combos channel 0x24 (flask_combos) — enabled
  * 0x01 u16, slot count 0x02 RO u16, timeout ms 0x03 u16, slot 0x10
  * payload-addressed [slot, pos x4 (0xFF empty), usage u32 BE]; SAVE
- * persists via "flask/combos". */
-#define FLASK_PROTO_VERSION 7
+ * persists via "flask/combos". v8 (2026-07-09): runtime macros channel
+ * 0x25 (flask_macros) — enabled 0x01 u16, slot count 0x02 / step capacity
+ * 0x03 RO u16, tap ms 0x04 / wait ms 0x05 u16, live state 0x06 (GET =
+ * playing slot+1 or 0; SET nonzero plays slot v-1, 0 stops; never
+ * persisted), step 0x10 payload-addressed [slot, step, action, param u32
+ * BE]; SAVE persists via "flask/macros". */
+#define FLASK_PROTO_VERSION 8
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -79,6 +88,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
 #define CH_COMBOS 0x24
+#define CH_MACROS 0x25
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape) */
 #define RGBMAP_ENABLED 0x01
@@ -95,6 +105,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define COMBOS_SLOT_COUNT 0x02 /* RO */
 #define COMBOS_TIMEOUT 0x03    /* global candidate window, ms */
 #define COMBOS_SLOT 0x10       /* payload-addressed: [slot, pos x4, usage u32 BE] */
+
+/* Macros values (channel 0x25) */
+#define MACROS_ENABLED 0x01
+#define MACROS_SLOT_COUNT 0x02 /* RO */
+#define MACROS_STEP_COUNT 0x03 /* RO — steps per slot */
+#define MACROS_TAP_MS 0x04     /* tap step down→up, ms */
+#define MACROS_WAIT_MS 0x05    /* between steps, ms */
+#define MACROS_STATE 0x06      /* live: GET = playing slot+1 (0 idle); SET v>0 plays v-1, 0 stops */
+#define MACROS_STEP 0x10       /* payload-addressed: [slot, step, action, param u32 BE] */
 
 /* Meta values */
 #define META_PROTOCOL_VERSION 0x01
@@ -433,6 +452,89 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
 }
 #endif /* CONFIG_ZMK_FLASK_COMBOS */
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+/* Channel 0x25 — the step value is a PAYLOAD-ADDRESSED byte frame:
+ * [slot, step, action, param u32 BE]. GET reads [slot, step] and answers in
+ * place; SET applies (normalized) and echoes what stuck. MACROS_STATE is
+ * live-only: playing slot+1 on GET (0 = idle), SET nonzero plays that
+ * slot-1, SET 0 stops — never persisted. */
+static bool handle_macros(uint8_t cmd, uint8_t value_id, uint8_t *payload,
+                          size_t payload_len) {
+    switch (value_id) {
+    case MACROS_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_macros_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_macros_enabled() ? 1 : 0);
+        return true;
+    case MACROS_SLOT_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_macros_slot_count());
+        return true;
+    case MACROS_STEP_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_macros_step_count());
+        return true;
+    case MACROS_TAP_MS:
+        if (cmd == CMD_SET) {
+            flask_macros_set_tap_ms(rd_u16(payload));
+        }
+        wr_u16(payload, flask_macros_tap_ms());
+        return true;
+    case MACROS_WAIT_MS:
+        if (cmd == CMD_SET) {
+            flask_macros_set_wait_ms(rd_u16(payload));
+        }
+        wr_u16(payload, flask_macros_wait_ms());
+        return true;
+    case MACROS_STATE:
+        if (cmd == CMD_SET) {
+            uint16_t v = rd_u16(payload);
+
+            if (v == 0) {
+                flask_macros_stop();
+            } else if (flask_macros_play(v - 1) != 0) {
+                return false;
+            }
+        }
+        wr_u16(payload, (uint16_t)(flask_macros_playing_slot() + 1));
+        return true;
+    case MACROS_STEP: {
+        if (payload_len < 2 + 1 + 4) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        uint8_t step = payload[1];
+        struct flask_macro_step s;
+
+        if (cmd == CMD_SET) {
+            s.action = payload[2];
+            s.param = ((uint32_t)payload[3] << 24) | ((uint32_t)payload[4] << 16) |
+                      ((uint32_t)payload[5] << 8) | payload[6];
+            if (flask_macros_step_set(slot, step, &s) != 0) {
+                return false;
+            }
+        }
+        if (flask_macros_step_get(slot, step, &s) != 0) {
+            return false;
+        }
+        payload[2] = s.action;
+        payload[3] = s.param >> 24;
+        payload[4] = s.param >> 16;
+        payload[5] = s.param >> 8;
+        payload[6] = s.param;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_MACROS */
+
 static bool handle_save(uint8_t channel) {
     switch (channel) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
@@ -472,6 +574,10 @@ static bool handle_save(uint8_t channel) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
     case CH_COMBOS:
         return flask_combos_save() == 0;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+    case CH_MACROS:
+        return flask_macros_save() == 0;
 #endif
     default:
         return false;
@@ -523,6 +629,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
         case CH_COMBOS:
             ok = handle_combos(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+        case CH_MACROS:
+            ok = handle_macros(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
         default:
@@ -605,6 +716,11 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
     if (settings_name_steq(name, "combos", NULL)) {
         return flask_combos_settings_restore(len, read_cb, cb_arg);
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+    if (settings_name_steq(name, "macros", NULL)) {
+        return flask_macros_settings_restore(len, read_cb, cb_arg);
     }
 #endif
     return -ENOENT;
