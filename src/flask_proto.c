@@ -55,6 +55,14 @@
 #include <flask_macros/flask_macros.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
+#include <flask_leader/flask_leader.h>
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
+#include <flask_gestures/flask_gestures.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -87,8 +95,17 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * SAVE via "flask/scrollsnap"); (c) rgbmap effect engine values 0x04-0x08
  * (effect / speed / hue / sat / val); (d) combos keys-per-slot RO 0x04 and
  * the slot frame sized by it ([slot, pos x KEYS, usage u32 BE]) — combos/
- * macros capacities are Kconfig now and persist per-slot. */
-#define FLASK_PROTO_VERSION 9
+ * macros capacities are Kconfig now and persist per-slot. v10 (2026-07-09,
+ * leader/gestures round): (a) runtime leader channel 0x19 (flask_leader —
+ * timeout 0x01 u16 [QMK-shared id], slot count 0x02 / keys-per-seq 0x03
+ * RO, enabled 0x04, slot 0x50 payload-addressed [seq, pos x KEYS (0xFF
+ * empty), action, param u32 BE] — action 0 none / 1 usage tap / 2 play
+ * flask_macros slot; QMK's u16 slot-table ids 0x10-0x4D stay untouched);
+ * (b) runtime gestures channel 0x11 (flask_gestures — ratchet step 0x01 +
+ * active set 0x02 [QMK-shared ids], enabled 0x03, set count 0x04 RO, slot
+ * 0x50 payload-addressed [set, dir 0-7 E..NE-clockwise, action, param u32
+ * BE], same typed-output actions; QMK's 0x10-0x4F table ids untouched). */
+#define FLASK_PROTO_VERSION 10
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -101,7 +118,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * stay clear so channel ids keep meaning one thing across the ecosystem) */
 #define CH_META 0x00
 #define CH_ACCEL 0x10 /* QMK accel channel — same wire shape (v9) */
+#define CH_GESTURES 0x11 /* QMK gestures channel — shared knob ids, ZMK slot frame (v10) */
 #define CH_DRAGSCROLL 0x15
+#define CH_LEADER 0x19 /* QMK leader channel — shared timeout id, ZMK slot frame (v10) */
 #define CH_AUTOSCROLL 0x1A
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
@@ -180,6 +199,22 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define SNAP_LOCK_MS 0x05
 #define SNAP_LOCK_EVENTS 0x06
 #define SNAP_IDLE_RESET 0x07
+
+/* Leader values (channel 0x19; 0x01 = QMK leaderTimeout, slot frame at
+ * 0x50 clear of QMK's u16 table 0x10-0x4D) */
+#define LEADER_TIMEOUT 0x01
+#define LEADER_SLOT_COUNT 0x02 /* RO */
+#define LEADER_KEYS 0x03       /* RO — positions per sequence */
+#define LEADER_ENABLED 0x04
+#define LEADER_SLOT 0x50 /* payload-addressed: [seq, pos x KEYS, action, param u32 BE] */
+
+/* Gestures values (channel 0x11; 0x01/0x02 = QMK ratchetStep/activeSet,
+ * slot frame at 0x50 clear of QMK's u16 table 0x10-0x4F) */
+#define GES_RATCHET_STEP 0x01
+#define GES_ACTIVE_SET 0x02
+#define GES_ENABLED 0x03
+#define GES_SET_COUNT 0x04 /* RO */
+#define GES_SLOT 0x50 /* payload-addressed: [set, dir, action, param u32 BE] */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 struct flask_scroll_saved {
@@ -417,6 +452,133 @@ static bool handle_scrollsnap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     }
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP */
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
+/* Channel 0x19 — the slot value is a PAYLOAD-ADDRESSED byte frame:
+ * [seq, pos x KEYS (0xFF = empty), action, param u32 BE]. GET reads [seq]
+ * and answers in place; SET applies (normalized) and echoes what stuck. */
+static bool handle_leader(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
+    switch (value_id) {
+    case LEADER_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_leader_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_leader_enabled() ? 1 : 0);
+        return true;
+    case LEADER_TIMEOUT:
+        if (cmd == CMD_SET) {
+            flask_leader_set_timeout_ms(rd_u16(payload));
+        }
+        wr_u16(payload, flask_leader_timeout_ms());
+        return true;
+    case LEADER_SLOT_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_leader_slot_count());
+        return true;
+    case LEADER_KEYS:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, FLASK_LEADER_KEYS);
+        return true;
+    case LEADER_SLOT: {
+        const size_t a = 1 + FLASK_LEADER_KEYS; /* action offset */
+
+        if (payload_len < a + 1 + 4) {
+            return false;
+        }
+        uint8_t seq = payload[0];
+        struct flask_leader_slot s;
+
+        if (cmd == CMD_SET) {
+            memcpy(s.pos, &payload[1], FLASK_LEADER_KEYS);
+            s.out.action = payload[a];
+            s.out.param = ((uint32_t)payload[a + 1] << 24) | ((uint32_t)payload[a + 2] << 16) |
+                          ((uint32_t)payload[a + 3] << 8) | payload[a + 4];
+            if (flask_leader_slot_set(seq, &s) != 0) {
+                return false;
+            }
+        }
+        if (flask_leader_slot_get(seq, &s) != 0) {
+            return false;
+        }
+        memcpy(&payload[1], s.pos, FLASK_LEADER_KEYS);
+        payload[a] = s.out.action;
+        payload[a + 1] = s.out.param >> 24;
+        payload[a + 2] = s.out.param >> 16;
+        payload[a + 3] = s.out.param >> 8;
+        payload[a + 4] = s.out.param;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_LEADER */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
+/* Channel 0x11 — the slot value is a PAYLOAD-ADDRESSED byte frame:
+ * [set, dir (0-7, E..NE clockwise), action, param u32 BE]. */
+static bool handle_gestures(uint8_t cmd, uint8_t value_id, uint8_t *payload,
+                            size_t payload_len) {
+    switch (value_id) {
+    case GES_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_gestures_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_gestures_enabled() ? 1 : 0);
+        return true;
+    case GES_RATCHET_STEP:
+        if (cmd == CMD_SET) {
+            flask_gestures_set_ratchet_step(rd_u16(payload));
+        }
+        wr_u16(payload, flask_gestures_ratchet_step());
+        return true;
+    case GES_ACTIVE_SET:
+        if (cmd == CMD_SET) {
+            flask_gestures_set_active_set((uint8_t)rd_u16(payload));
+        }
+        wr_u16(payload, flask_gestures_active_set());
+        return true;
+    case GES_SET_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_gestures_set_count());
+        return true;
+    case GES_SLOT: {
+        if (payload_len < 2 + 1 + 4) {
+            return false;
+        }
+        uint8_t set = payload[0];
+        uint8_t dir = payload[1];
+        struct flask_output out;
+
+        if (cmd == CMD_SET) {
+            out.action = payload[2];
+            out.param = ((uint32_t)payload[3] << 24) | ((uint32_t)payload[4] << 16) |
+                        ((uint32_t)payload[5] << 8) | payload[6];
+            if (flask_gestures_output_set(set, dir, &out) != 0) {
+                return false;
+            }
+        }
+        if (flask_gestures_output_get(set, dir, &out) != 0) {
+            return false;
+        }
+        payload[2] = out.action;
+        payload[3] = out.param >> 24;
+        payload[4] = out.param >> 16;
+        payload[5] = out.param >> 8;
+        payload[6] = out.param;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
@@ -840,6 +1002,14 @@ static bool handle_save(uint8_t channel) {
     case CH_MACROS:
         return flask_macros_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
+    case CH_LEADER:
+        return flask_leader_save() == 0;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
+    case CH_GESTURES:
+        return flask_gestures_save() == 0;
+#endif
     default:
         return false;
     }
@@ -890,6 +1060,16 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
         case CH_SCROLLSNAP:
             ok = handle_scrollsnap(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
+        case CH_LEADER:
+            ok = handle_leader(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
+        case CH_GESTURES:
+            ok = handle_gestures(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
@@ -1047,6 +1227,26 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         if (settings_name_steq(name, "macros", &sub)) {
             return flask_macros_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
                                                  cb_arg);
+        }
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "leader", &sub)) {
+            return flask_leader_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                 cb_arg);
+        }
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "gestures", &sub)) {
+            return flask_gestures_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                   cb_arg);
         }
     }
 #endif

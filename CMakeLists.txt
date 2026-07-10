@@ -18,6 +18,12 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_FLASK_COMBOS app PRIVATE src/flask_combos.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_MACROS app PRIVATE src/flask_macros.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_MACROS app PRIVATE src/behavior_flask_macros.c)
+  # flask_leader's listener must run AFTER flask_proto's keystate listener
+  # (same link-order rule as combos) and after combos' capture.
+  target_sources_ifdef(CONFIG_ZMK_FLASK_LEADER app PRIVATE src/flask_leader.c)
+  target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_LEADER app PRIVATE src/behavior_flask_leader.c)
+  target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES app PRIVATE src/input_processor_flask_gestures.c)
+  target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_GESTURES app PRIVATE src/behavior_flask_gestures.c)
   if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
     target_sources(app PRIVATE src/flask_rgb_split_central.c)
   endif()

@@ -1,0 +1,29 @@
+/*
+ * Default flask_gestures instance + &fges trigger behavior. Wire up from
+ * the consuming keymap:
+ *
+ *   #include <flask_gestures.dtsi>
+ *   // FRONT of both ball listener chains (raw counts, like the kot149
+ *   // module this replaces):
+ *   //   input-processors = <&flask_gestures &flask_accel ...>;
+ *   // keymap: &fges 255 (follow the app's active set) or &fges <n>
+ *
+ * The processor swallows motion only while a gesture is open (behavior
+ * held) — no swallow/re-emit, no second listener.
+ */
+
+/ {
+    flask_gestures: flask_gestures {
+        compatible = "zmk,input-processor-flask-gestures";
+        #input-processor-cells = <0>;
+        status = "okay";
+    };
+
+    behaviors {
+        fges: flask_gestures_trigger {
+            compatible = "zmk,behavior-flask-gestures";
+            #binding-cells = <1>;
+            display-name = "Flask Gesture";
+        };
+    };
+};

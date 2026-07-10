@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "Flask runtime-gesture trigger behavior. Param selects the gesture set
+  held open (255 follows the live active set, Flask channel 0x11); ball
+  motion ratchet-fires the set's direction outputs until release."
+
+compatible: "zmk,behavior-flask-gestures"
+
+properties:
+  display-name:
+    type: string
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+
+binding-cells:
+  - param1

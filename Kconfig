@@ -169,6 +169,68 @@ config ZMK_FLASK_MACROS_STEPS
     help
       Typed steps (tap/press/release/wait) one macro can hold.
 
+config ZMK_FLASK_LEADER
+    bool "Flask runtime leader sequences"
+    depends on SETTINGS
+    help
+      Runtime-editable leader sequences (channel 0x19): the &fled behavior
+      opens a capture, key positions match the app-edited table, an
+      unambiguous match fires a typed output (usage tap or flask_macros
+      slot). Coexists with urob's compile-time leader key. Central-only on
+      splits (no engine DT node — enable explicitly in the board .conf; the
+      &fled keymap node auto-enables only the behavior below).
+
+config ZMK_FLASK_LEADER_SLOTS
+    int "Runtime leader sequence slots"
+    depends on ZMK_FLASK_LEADER
+    range 1 64
+    default 16
+
+config ZMK_FLASK_LEADER_KEYS
+    int "Max keys per leader sequence"
+    depends on ZMK_FLASK_LEADER
+    range 2 8
+    default 8
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_LEADER := zmk,behavior-flask-leader
+
+config ZMK_BEHAVIOR_FLASK_LEADER
+    bool "Flask leader behavior (&fled)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_LEADER))
+    depends on ZMK_FLASK_LEADER
+    help
+      Keymap behavior opening a flask_leader capture: &fled.
+
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_GESTURES := zmk,input-processor-flask-gestures
+
+config ZMK_INPUT_PROCESSOR_FLASK_GESTURES
+    bool "Flask runtime mouse gestures input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_GESTURES))
+    depends on ZMK_POINTING
+    depends on INPUT
+    depends on SETTINGS
+    help
+      Runtime-editable mouse gestures (channel 0x11) — port of the Flask
+      (QMK) pd_gestures ratchet engine. Direction outputs live in runtime
+      sets; the &fges behavior holds a gesture open. Replaces
+      kot149/zmk-mouse-gesture's compile-time stroke patterns.
+
+config ZMK_FLASK_GESTURES_SETS
+    int "Gesture sets"
+    depends on ZMK_INPUT_PROCESSOR_FLASK_GESTURES
+    range 1 16
+    default 8
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_GESTURES := zmk,behavior-flask-gestures
+
+config ZMK_BEHAVIOR_FLASK_GESTURES
+    bool "Flask gestures behavior (&fges)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_GESTURES))
+    depends on ZMK_INPUT_PROCESSOR_FLASK_GESTURES
+    help
+      Keymap behavior holding a gesture open: &fges <set> (255 = follow
+      the live active set).
+
 DT_COMPAT_ZMK_BEHAVIOR_FLASK_MACROS := zmk,behavior-flask-macros
 
 config ZMK_BEHAVIOR_FLASK_MACROS
