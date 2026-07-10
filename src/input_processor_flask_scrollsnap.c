@@ -259,6 +259,14 @@ static int flask_scrollsnap_init(const struct device *dev) {
     const struct flask_scrollsnap_dt_config *cfg = dev->config;
 
     data->live = cfg->defaults;
+    /* Clamp DT-sourced defaults exactly like the runtime setter — an
+     * unclamped samples of 0 is a modulo-by-zero in the ring buffer
+     * (autoscroll init-bug rule: raw DT props never feed a division). */
+    data->live.threshold_pct = CLAMP(data->live.threshold_pct, 50, 99);
+    data->live.samples = CLAMP(data->live.samples, 1, SNAP_MAX_SAMPLES);
+    data->live.lock_ms = MIN(data->live.lock_ms, 10000);
+    data->live.lock_events = MIN(data->live.lock_events, 1000);
+    data->live.idle_reset_ms = MIN(data->live.idle_reset_ms, 10000);
     snap_reset(data);
     data->last_event_ms = k_uptime_get();
     if (flask_scrollsnap_singleton == NULL) {

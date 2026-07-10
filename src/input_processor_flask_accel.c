@@ -156,6 +156,14 @@ static int flask_accel_init(const struct device *dev) {
     const struct flask_accel_dt_config *cfg = dev->config;
 
     data->live = cfg->defaults;
+    /* Clamp DT-sourced defaults exactly like the runtime setter — an
+     * unclamped takeoff of 0 divides by zero in the curve (g/k). Same
+     * hard-won rule as the autoscroll init bug: never trust raw DT props
+     * that feed a division. */
+    data->live.takeoff_x100 = CLAMP(data->live.takeoff_x100, 50, 1000);
+    data->live.growth_x100 = MIN(data->live.growth_x100, 200);
+    data->live.offset_x100 = CLAMP(data->live.offset_x100, -1000, 1000);
+    data->live.limit_x100 = MIN(data->live.limit_x100, 100);
     data->dpi_factor = 1000.0f / (float)MAX(cfg->cpi, 1);
     if (flask_accel_singleton == NULL) {
         flask_accel_singleton = data;
