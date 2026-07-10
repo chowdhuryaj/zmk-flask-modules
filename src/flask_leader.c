@@ -39,6 +39,10 @@
 
 #include <flask_leader/flask_leader.h>
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+#include <flask_rgb/flask_rgb.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define TIMEOUT_MIN_MS 100
@@ -81,10 +85,48 @@ static uint8_t held_count;
 
 static struct k_work_delayable timeout_task;
 
+/* Reactive RGB (2026-07-10): while a capture is open, light the keys that
+ * can legally come NEXT — every live slot whose sequence extends the current
+ * buffer contributes its next position. Rides flask_rgb's transient overlay
+ * (renders above map + effect, split-synced, never persisted); compiles out
+ * without flask_rgb. */
+#if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
+static void leader_overlay_update(void) {
+    uint8_t cand[FLASK_LEADER_SLOTS];
+    uint8_t n = 0;
+
+    K_SPINLOCK(&cfg_lock) {
+        for (int i = 0; i < FLASK_LEADER_SLOTS; i++) {
+            const struct flask_leader_slot *s = &cfg.slots[i];
+
+            if (!slot_live(s) || slot_seq_len(s) <= buf_len) {
+                continue;
+            }
+            if (buf_len > 0 && memcmp(s->pos, buf, buf_len) != 0) {
+                continue;
+            }
+            cand[n++] = s->pos[buf_len];
+        }
+    }
+    if (n > 0) {
+        static const uint8_t hue_green[3] = {85, 255, 180};
+
+        flask_rgb_overlay_positions(cand, n, hue_green);
+    } else {
+        flask_rgb_overlay_clear();
+    }
+}
+static void leader_overlay_clear(void) { flask_rgb_overlay_clear(); }
+#else
+static void leader_overlay_update(void) {}
+static void leader_overlay_clear(void) {}
+#endif
+
 static void capture_end(void) {
     capturing = false;
     buf_len = 0;
     k_work_cancel_delayable(&timeout_task);
+    leader_overlay_clear();
     /* held[] persists — swallowed downs still owe swallowed ups. */
 }
 
@@ -160,6 +202,7 @@ void flask_leader_begin(void) {
     }
     capturing = true;
     buf_len = 0;
+    leader_overlay_update(); /* light every sequence's first key */
     k_work_reschedule(&timeout_task, K_MSEC(flask_leader_timeout_ms()));
 }
 
@@ -204,7 +247,9 @@ static int flask_leader_listener(const zmk_event_t *eh) {
     } else if (res == -1 || buf_len >= FLASK_LEADER_KEYS) {
         capture_end();
     } else {
-        /* -2 / -3: keep listening; every key re-arms the timeout. */
+        /* -2 / -3: keep listening; every key re-arms the timeout and the
+         * candidate lights narrow to the surviving sequences. */
+        leader_overlay_update();
         k_work_reschedule(&timeout_task, K_MSEC(flask_leader_timeout_ms()));
     }
     return ZMK_EV_EVENT_HANDLED;

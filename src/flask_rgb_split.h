@@ -15,6 +15,8 @@
  *   0x05 chunk:   [op, layer, start LE u16, n, n×hsv]  (5 + 3n B, n ≤ 4)
  *   0x06 effect:  [op, effect, speed, h, s, v, phase LE u16]  (8 B)
  *                 (phase re-anchors the peripheral's animation clock)
+ *   0x07 overlay: [op, on, h, s, v, mask bytes]  (5 + ceil(total/8) B)
+ *                 (reactive overlay — transient highlight above map+effect)
  *
  * SPDX-License-Identifier: MIT
  */
@@ -22,6 +24,12 @@
 #pragma once
 
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/devicetree.h>
+
+/* Whole-board LED count, visible to both split halves (same DT). Sizes the
+ * overlay frame's bitmask. */
+#define FRGB_SPLIT_TOTAL DT_PROP(DT_COMPAT_GET_ANY_STATUS_OKAY(flask_rgb), total_leds)
+#define FRGB_OVERLAY_MASK_BYTES ((FRGB_SPLIT_TOTAL + 7) / 8)
 
 #define FLASK_RGB_SVC_UUID                                                                         \
     BT_UUID_128_ENCODE(0xf1a5cb01, 0x52b6, 0x4e0b, 0x9fd2, 0x1e7e37c1a2f4)
@@ -34,5 +42,6 @@
 #define FRGB_OP_FILL 0x04
 #define FRGB_OP_CHUNK 0x05
 #define FRGB_OP_EFFECT 0x06
+#define FRGB_OP_OVERLAY 0x07
 
 #define FRGB_CHUNK_MAX 4

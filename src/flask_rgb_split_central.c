@@ -58,6 +58,7 @@ static bool frgb_send_fill_pending;
 static uint8_t frgb_fill_layer;
 static uint8_t frgb_fill_hsv[3];
 static bool frgb_send_effect_pending;
+static bool frgb_send_overlay_pending;
 static bool frgb_bulk_active;
 static uint8_t frgb_bulk_layer;
 static uint16_t frgb_bulk_led;
@@ -81,7 +82,7 @@ static void frgb_tx_drain(struct k_work *work) {
         return;
     }
 
-    uint8_t buf[5 + 3 * FRGB_CHUNK_MAX];
+    uint8_t buf[MAX(5 + 3 * FRGB_CHUNK_MAX, 5 + FRGB_OVERLAY_MASK_BYTES)];
     int err = 0;
 
     for (int budget = 0; budget < 16 && err == 0; budget++) {
@@ -89,6 +90,7 @@ static void frgb_tx_drain(struct k_work *work) {
 
         /* latest-state flags first: enabled, then layer state */
         bool do_enabled = false, do_layers = false, do_fill = false, do_effect = false;
+        bool do_overlay = false;
         bool enabled_val = false;
         uint32_t layers_val = 0;
         uint8_t fill_layer = 0, fill_hsv[3];
@@ -110,6 +112,9 @@ static void frgb_tx_drain(struct k_work *work) {
             } else if (frgb_send_effect_pending) {
                 do_effect = true;
                 frgb_send_effect_pending = false;
+            } else if (frgb_send_overlay_pending) {
+                do_overlay = true;
+                frgb_send_overlay_pending = false;
             }
         }
 
@@ -159,6 +164,16 @@ static void frgb_tx_drain(struct k_work *work) {
             err = frgb_wwr(buf, 8);
             if (err) {
                 K_SPINLOCK(&frgb_tx_lock) { frgb_send_effect_pending = true; }
+            }
+            sent = true;
+        } else if (do_overlay) {
+            /* Snapshot at send time — latest overlay wins (a stale candidate
+             * set is worse than a skipped intermediate one). */
+            buf[0] = FRGB_OP_OVERLAY;
+            flask_rgb_overlay_snapshot(&buf[1], &buf[2], &buf[5], FRGB_OVERLAY_MASK_BYTES);
+            err = frgb_wwr(buf, 5 + FRGB_OVERLAY_MASK_BYTES);
+            if (err) {
+                K_SPINLOCK(&frgb_tx_lock) { frgb_send_overlay_pending = true; }
             }
             sent = true;
         } else {
@@ -241,6 +256,11 @@ void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
 
 void flask_rgb_split_send_effect(void) {
     K_SPINLOCK(&frgb_tx_lock) { frgb_send_effect_pending = true; }
+    k_work_schedule(&frgb_tx_work, K_NO_WAIT);
+}
+
+void flask_rgb_split_send_overlay(void) {
+    K_SPINLOCK(&frgb_tx_lock) { frgb_send_overlay_pending = true; }
     k_work_schedule(&frgb_tx_work, K_NO_WAIT);
 }
 

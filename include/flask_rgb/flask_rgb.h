@@ -89,3 +89,20 @@ void flask_rgb_split_send_effect(void);
 
 /* Full-map walk for the connect-time bulk sync. */
 void flask_rgb_bulk_resync(void);
+
+/* --- reactive overlay (2026-07-10) ---
+ *
+ * A transient one-color highlight rendered ABOVE the painted map and the
+ * effect: position-addressed (keymap positions, resolved to LEDs via the
+ * node's key-positions map), never persisted, cleared as a whole. Built for
+ * reactive UI cues — flask_leader lights the candidate next keys during a
+ * capture. Central-side calls sync to the peripheral automatically. */
+void flask_rgb_overlay_positions(const uint8_t *positions, uint8_t count, const uint8_t hsv[3]);
+void flask_rgb_overlay_clear(void);
+
+/* Overlay snapshot for the central's egress + peripheral ingest.
+ * mask = total-leds bits, byte i/8 bit i%8. */
+#define FLASK_RGB_OVERLAY_MASK_BYTES(total) (((total) + 7) / 8)
+void flask_rgb_overlay_snapshot(uint8_t *on, uint8_t hsv[3], uint8_t *mask, size_t mask_len);
+void flask_rgb_sync_overlay(uint8_t on, const uint8_t hsv[3], const uint8_t *mask, size_t mask_len);
+void flask_rgb_split_send_overlay(void);

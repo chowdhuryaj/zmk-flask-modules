@@ -70,6 +70,25 @@ static uint8_t frgb_effect_speed = 128;
 static uint8_t frgb_effect_col[3] = {0, 255, 120};
 static uint16_t frgb_phase;
 
+/* Reactive overlay (2026-07-10): one color over a set of LEDs, rendered
+ * ABOVE map + effect. Transient (never persisted); flask_leader lights the
+ * candidate next keys with it. Position-addressed at the API, resolved to
+ * LEDs via the node's key-positions map (identity when absent). */
+#define FRGB_MASK_BYTES FLASK_RGB_OVERLAY_MASK_BYTES(FRGB_TOTAL)
+static uint8_t frgb_overlay_mask[FRGB_MASK_BYTES];
+static uint8_t frgb_overlay_col[3];
+static bool frgb_overlay_on;
+
+#if DT_NODE_HAS_PROP(FRGB_NODE, key_positions)
+static const uint8_t frgb_led_pos[] = DT_PROP(FRGB_NODE, key_positions);
+BUILD_ASSERT(ARRAY_SIZE(frgb_led_pos) == FRGB_TOTAL,
+             "flask,rgb key-positions must have total-leds entries");
+#endif
+
+/* position → LED (0xFF = no LED under that position); built at init. */
+BUILD_ASSERT(FRGB_TOTAL <= 255, "flask,rgb overlay table indexes LEDs as bytes");
+static uint8_t frgb_pos2led[256];
+
 static struct led_rgb frgb_pixels[FRGB_LOCAL];
 static struct k_work frgb_render_work;
 static struct k_work_delayable frgb_anim_work;
@@ -95,6 +114,7 @@ __weak void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
     ARG_UNUSED(hsv);
 }
 __weak void flask_rgb_split_send_effect(void) {}
+__weak void flask_rgb_split_send_overlay(void) {}
 __weak void flask_rgb_bulk_resync(void) {}
 
 /* --- HSV (0-255 each, QMK convention) → led_rgb --- */
@@ -165,15 +185,20 @@ static void frgb_render(struct k_work *work) {
         dark = !frgb_enabled || !frgb_awake;
         layer = MIN(frgb_layer, FRGB_LAYERS - 1);
         for (int i = 0; i < FRGB_LOCAL; i++) {
-            const uint8_t *hsv = frgb_map[layer][FRGB_OFFSET + i];
+            uint16_t g = FRGB_OFFSET + i;
+            const uint8_t *hsv = frgb_map[layer][g];
 
             if (dark) {
                 frgb_pixels[i] = (struct led_rgb){0};
+            } else if (frgb_overlay_on && (frgb_overlay_mask[g / 8] >> (g % 8)) & 1) {
+                /* reactive overlay sits above map AND effect */
+                frgb_pixels[i] =
+                    frgb_hsv_to_rgb(frgb_overlay_col[0], frgb_overlay_col[1], frgb_overlay_col[2]);
             } else if (hsv[2] != 0) {
                 /* painted map key overlays the effect */
                 frgb_pixels[i] = frgb_hsv_to_rgb(hsv[0], hsv[1], hsv[2]);
             } else {
-                frgb_pixels[i] = frgb_effect_pixel(FRGB_OFFSET + i);
+                frgb_pixels[i] = frgb_effect_pixel(g);
             }
         }
     }
@@ -304,6 +329,61 @@ void flask_rgb_effect_snapshot(uint8_t *effect, uint8_t *speed, uint8_t hsv[3],
         memcpy(hsv, frgb_effect_col, 3);
         *phase = frgb_phase;
     }
+}
+
+/* --- reactive overlay (position-addressed; transient, never persisted) --- */
+
+void flask_rgb_overlay_positions(const uint8_t *positions, uint8_t count, const uint8_t hsv[3]) {
+    if (positions == NULL || count == 0 || hsv == NULL) {
+        flask_rgb_overlay_clear();
+        return;
+    }
+    K_SPINLOCK(&frgb_lock) {
+        memset(frgb_overlay_mask, 0, sizeof(frgb_overlay_mask));
+        for (uint8_t i = 0; i < count; i++) {
+            uint8_t led = frgb_pos2led[positions[i]];
+
+            if (led != 0xFF) {
+                frgb_overlay_mask[led / 8] |= BIT(led % 8);
+            }
+        }
+        memcpy(frgb_overlay_col, hsv, 3);
+        frgb_overlay_on = true;
+    }
+    flask_rgb_split_send_overlay();
+    frgb_schedule_render();
+}
+
+void flask_rgb_overlay_clear(void) {
+    bool was_on;
+
+    K_SPINLOCK(&frgb_lock) {
+        was_on = frgb_overlay_on;
+        frgb_overlay_on = false;
+    }
+    if (was_on) {
+        flask_rgb_split_send_overlay();
+        frgb_schedule_render();
+    }
+}
+
+void flask_rgb_overlay_snapshot(uint8_t *on, uint8_t hsv[3], uint8_t *mask, size_t mask_len) {
+    K_SPINLOCK(&frgb_lock) {
+        *on = frgb_overlay_on ? 1 : 0;
+        memcpy(hsv, frgb_overlay_col, 3);
+        memcpy(mask, frgb_overlay_mask, MIN(mask_len, sizeof(frgb_overlay_mask)));
+    }
+}
+
+void flask_rgb_sync_overlay(uint8_t on, const uint8_t hsv[3], const uint8_t *mask,
+                            size_t mask_len) {
+    K_SPINLOCK(&frgb_lock) {
+        frgb_overlay_on = on != 0;
+        memcpy(frgb_overlay_col, hsv, 3);
+        memset(frgb_overlay_mask, 0, sizeof(frgb_overlay_mask));
+        memcpy(frgb_overlay_mask, mask, MIN(mask_len, sizeof(frgb_overlay_mask)));
+    }
+    frgb_schedule_render();
 }
 
 /* --- peripheral ingest (GATT write handler → here) --- */
@@ -468,6 +548,18 @@ ZMK_SUBSCRIPTION(flask_rgb_activity, zmk_activity_state_changed);
 /* --- init --- */
 
 static int flask_rgb_init(void) {
+    /* position → LED reverse map for the overlay API: from the node's
+     * key-positions property, identity fallback without it. */
+    memset(frgb_pos2led, 0xFF, sizeof(frgb_pos2led));
+#if DT_NODE_HAS_PROP(FRGB_NODE, key_positions)
+    for (uint16_t led = 0; led < FRGB_TOTAL; led++) {
+        frgb_pos2led[frgb_led_pos[led]] = led;
+    }
+#else
+    for (uint16_t led = 0; led < MIN(FRGB_TOTAL, 256); led++) {
+        frgb_pos2led[led] = led;
+    }
+#endif
     k_work_init(&frgb_render_work, frgb_render);
     k_work_init_delayable(&frgb_anim_work, frgb_anim_tick);
     if (!device_is_ready(frgb_strip)) {

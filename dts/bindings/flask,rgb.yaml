@@ -29,3 +29,15 @@ properties:
     type: int
     default: 10
     description: Layers in the color map (match the keymap's layer count).
+
+  key-positions:
+    type: array
+    description: >
+      Keymap position lit by each LED — entry i is the key position LED i
+      sits under, total-leds entries. Lets position-addressed consumers
+      (the reactive-overlay API, e.g. flask_leader candidate lighting)
+      resolve positions to LEDs. Omit for identity (LED i = position i).
+      On a split whose per-half chains run in per-half position order
+      (the Imprint), this is where the interleaved row numbering gets
+      flattened. If the bench paint sweep says the chain order differs,
+      fix it HERE (one property), not in the consumers.
