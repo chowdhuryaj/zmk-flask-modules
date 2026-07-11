@@ -109,7 +109,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * active set 0x02 [QMK-shared ids], enabled 0x03, set count 0x04 RO, slot
  * 0x50 payload-addressed [set, dir 0-7 E..NE-clockwise, action, param u32
  * BE], same typed-output actions; QMK's 0x10-0x4F table ids untouched).
- * v11 (2026-07-11): trackball role-swap channel 0x1B (flask_ballswap —
+ * v11 (2026-07-11): trackball role-swap channel 0x27 (flask_ballswap —
  * swapped base state 0x01 u16 RW [SET applies live, SAVE or the &bswap 0
  * key persists], effective state 0x02 RO u16 [base XOR momentary holds]). */
 #define FLASK_PROTO_VERSION 11
@@ -129,12 +129,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_DRAGSCROLL 0x15
 #define CH_LEADER 0x19 /* QMK leader channel — shared timeout id, ZMK slot frame (v10) */
 #define CH_AUTOSCROLL 0x1A
-#define CH_BALLSWAP 0x1B /* ZMK-line: flask_ballswap (v11) */
+
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
 #define CH_COMBOS 0x24
 #define CH_MACROS 0x25
 #define CH_SCROLLSNAP 0x26 /* ZMK-line: flask_scrollsnap (v9) */
+#define CH_BALLSWAP 0x27 /* ZMK-line: flask_ballswap (v11); 0x1B-0x1F are QMK's */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
