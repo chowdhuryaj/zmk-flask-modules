@@ -229,6 +229,8 @@ static void frgb_tx_drain(struct k_work *work) {
 
 /* --- egress fns (override the weak no-ops in flask_rgb.c) --- */
 
+bool flask_rgb_split_link_ready(void) { return frgb_link.ready; }
+
 void flask_rgb_split_send_layers(uint32_t layer_bitmap) {
     K_SPINLOCK(&frgb_tx_lock) {
         frgb_send_layers_pending = true;

@@ -42,9 +42,46 @@ static int on_frgb_binding_released(struct zmk_behavior_binding *binding,
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
+/* Studio metadata — without it every &frgb assignment is rejected with
+ * INVALID PARAMETERS (see behavior_flask_leader.c, bench 2026-07-11). */
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+
+static const struct behavior_parameter_value_metadata frgb_param_values[] = {
+    {
+        .display_name = "Toggle",
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+        .value = FRGB_TOG,
+    },
+    {
+        .display_name = "On",
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+        .value = FRGB_ON,
+    },
+    {
+        .display_name = "Off",
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+        .value = FRGB_OFF,
+    },
+};
+
+static const struct behavior_parameter_metadata_set frgb_param_metadata_set[] = {{
+    .param1_values = frgb_param_values,
+    .param1_values_len = ARRAY_SIZE(frgb_param_values),
+}};
+
+static const struct behavior_parameter_metadata frgb_metadata = {
+    .sets_len = ARRAY_SIZE(frgb_param_metadata_set),
+    .sets = frgb_param_metadata_set,
+};
+
+#endif
+
 static const struct behavior_driver_api behavior_flask_rgb_driver_api = {
     .binding_pressed = on_frgb_binding_pressed,
     .binding_released = on_frgb_binding_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    .parameter_metadata = &frgb_metadata,
+#endif
 };
 
 static int behavior_flask_rgb_init(const struct device *dev) { return 0; }

@@ -110,6 +110,12 @@ static bool frgb_effect_animates(uint8_t effect) {
            effect == FLASK_RGB_EFFECT_SWIRL;
 }
 
+/* Split-link diagnosis (channel 0x21 value 0x09 RO): has the central found
+ * the peripheral's flask_rgb characteristic? Overridden by
+ * flask_rgb_split_central.c; false elsewhere (a peripheral answering the
+ * protocol would be a config error anyway). */
+__weak bool flask_rgb_split_link_ready(void) { return false; }
+
 /* --- weak split egress: overridden by flask_rgb_split_central.c --- */
 
 __weak void flask_rgb_split_send_layers(uint32_t layer_bitmap) { ARG_UNUSED(layer_bitmap); }
@@ -225,17 +231,18 @@ static void frgb_schedule_render(void) { k_work_submit(&frgb_render_work); }
 /* --- strip power kick (see the ext-power comment up top) --- */
 
 #if defined(FRGB_HAS_EXT_POWER)
-static void frgb_power_kick(struct k_work *work) {
-    ARG_UNUSED(work);
+static bool frgb_power_rekicked; /* second pass 12 s later (slow peripherals) */
 
+static void frgb_power_kick(struct k_work *work) {
     const struct device *ext = DEVICE_DT_GET_ANY(zmk_ext_power_generic);
 
-    if (!device_is_ready(ext)) {
-        return;
-    }
-    if (frgb_enabled && ext_power_get(ext) < 1) {
+    if (device_is_ready(ext) && frgb_enabled && ext_power_get(ext) < 1) {
         LOG_INF("flask_rgb: enabling ext power for the LED strip");
         ext_power_enable(ext); /* driver persists the new state itself */
+    }
+    if (!frgb_power_rekicked) {
+        frgb_power_rekicked = true;
+        k_work_schedule(k_work_delayable_from_work(work), K_SECONDS(12));
     }
 }
 static K_WORK_DELAYABLE_DEFINE(frgb_power_work, frgb_power_kick);

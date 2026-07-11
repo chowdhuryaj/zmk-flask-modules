@@ -36,6 +36,10 @@ int flask_rgb_fill(uint8_t layer, const uint8_t hsv[3]);
 
 /* Map enable (the &frgb behavior + channel 0x21 value 0x01). */
 bool flask_rgb_enabled(void);
+
+/* Split-link diagnosis (channel 0x21 value 0x09 RO): true once the central
+ * has discovered the peripheral's flask_rgb characteristic. */
+bool flask_rgb_split_link_ready(void);
 void flask_rgb_set_enabled(bool on);
 
 /* Whole-strip effect engine (channel 0x21 values 0x04-0x08, proto v9).

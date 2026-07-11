@@ -36,6 +36,12 @@ static int on_fled_binding_released(struct zmk_behavior_binding *binding,
 static const struct behavior_driver_api behavior_flask_leader_driver_api = {
     .binding_pressed = on_fled_binding_pressed,
     .binding_released = on_fled_binding_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    /* No params — but WITHOUT this, behavior_get_parameter_metadata returns
+     * -ENODEV and Studio rejects every &fled assignment with INVALID
+     * PARAMETERS (bench 2026-07-11; core 0-param behaviors all carry it). */
+    .get_parameter_metadata = zmk_behavior_get_empty_param_metadata,
+#endif
 };
 
 static int behavior_flask_leader_init(const struct device *dev) { return 0; }

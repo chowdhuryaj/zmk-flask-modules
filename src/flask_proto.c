@@ -22,6 +22,10 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/logging/log.h>
 
+#if IS_ENABLED(CONFIG_HWINFO)
+#include <zephyr/drivers/hwinfo.h>
+#endif
+
 #include <zmk/event_manager.h>
 #include <zmk/keymap.h>
 #include <zmk/events/position_state_changed.h>
@@ -147,6 +151,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define RGBMAP_EFFECT_HUE 0x06
 #define RGBMAP_EFFECT_SAT 0x07
 #define RGBMAP_EFFECT_VAL 0x08
+#define RGBMAP_SPLIT_LINK 0x09 /* RO — central found the peripheral's rgb GATT char */
 #define RGBMAP_LED 0x10    /* payload-addressed: [layer, led, h, s, v] */
 #define RGBMAP_FILL 0x12   /* payload-addressed: [layer, h, s, v] */
 
@@ -173,6 +178,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define META_PROTOCOL_VERSION 0x01
 #define META_ACTIVE_LAYER 0x02
 #define META_FAMILY 0x03
+#define META_RESET_CAUSE 0x04 /* RO — Zephyr hwinfo reset-cause bits at boot
+                               * (crash forensics: SOFTWARE/CPU_LOCKUP/WATCHDOG
+                               * after an unexplained reboot); answers
+                               * unhandled without CONFIG_HWINFO */
 
 /* Dragscroll values — same wire vocabulary as the QMK families
  * (flaskproto.js V.dragDivH/dragDivV/dragInverted/dragInterval/
@@ -274,6 +283,25 @@ static void wr_u16(uint8_t *p, uint16_t v) {
 
 static uint16_t rd_u16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
 
+#if IS_ENABLED(CONFIG_HWINFO)
+/* Latched once at init: hwinfo reset-cause bits describe the LAST reset —
+ * read early and hold so late GETs (or a hwinfo clear elsewhere) can't
+ * muddy the story. Zephyr bits: 0 pin, 1 software, 2 brownout, 3 POR,
+ * 4 watchdog, 5 debug, 6 security, 7 low-power wake, 8 CPU lockup, ... */
+static uint16_t boot_reset_cause;
+
+static int flask_reset_cause_init(void) {
+    uint32_t cause = 0;
+
+    if (hwinfo_get_reset_cause(&cause) == 0) {
+        boot_reset_cause = (uint16_t)cause;
+    }
+    return 0;
+}
+
+SYS_INIT(flask_reset_cause_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+#endif
+
 static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     if (cmd != CMD_GET) {
         return false; /* meta is read-only */
@@ -288,6 +316,11 @@ static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     case META_FAMILY:
         wr_u16(payload, FLASK_FAMILY_IMPRINT);
         return true;
+#if IS_ENABLED(CONFIG_HWINFO)
+    case META_RESET_CAUSE:
+        wr_u16(payload, boot_reset_cause);
+        return true;
+#endif
     default:
         return false;
     }
@@ -790,6 +823,12 @@ static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         wr_u16(payload, hsv[idx]);
         return true;
     }
+    case RGBMAP_SPLIT_LINK:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_rgb_split_link_ready() ? 1 : 0);
+        return true;
     case RGBMAP_LED: {
         if (payload_len < 5) {
             return false;
