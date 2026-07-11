@@ -59,6 +59,10 @@
 #include <flask_leader/flask_leader.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
+#include <flask_ballswap/flask_ballswap.h>
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
 #include <flask_gestures/flask_gestures.h>
 #endif
@@ -104,8 +108,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * (b) runtime gestures channel 0x11 (flask_gestures — ratchet step 0x01 +
  * active set 0x02 [QMK-shared ids], enabled 0x03, set count 0x04 RO, slot
  * 0x50 payload-addressed [set, dir 0-7 E..NE-clockwise, action, param u32
- * BE], same typed-output actions; QMK's 0x10-0x4F table ids untouched). */
-#define FLASK_PROTO_VERSION 10
+ * BE], same typed-output actions; QMK's 0x10-0x4F table ids untouched).
+ * v11 (2026-07-11): trackball role-swap channel 0x1B (flask_ballswap —
+ * swapped base state 0x01 u16 RW [SET applies live, SAVE or the &bswap 0
+ * key persists], effective state 0x02 RO u16 [base XOR momentary holds]). */
+#define FLASK_PROTO_VERSION 11
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -122,6 +129,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_DRAGSCROLL 0x15
 #define CH_LEADER 0x19 /* QMK leader channel — shared timeout id, ZMK slot frame (v10) */
 #define CH_AUTOSCROLL 0x1A
+#define CH_BALLSWAP 0x1B /* ZMK-line: flask_ballswap (v11) */
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
 #define CH_COMBOS 0x24
@@ -182,6 +190,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* 0x03 AS_DEADZONE / 0x04 AS_RANGE retired with jog mode (proto v4) */
 #define AS_STATE 0x05       /* live: GET = stepped level; SET stops */
 #define AS_STOP_ON_KEY 0x06
+
+/* Ballswap values (channel 0x1B, ZMK line — no QMK equivalent) */
+#define BSWAP_SWAPPED 0x01   /* base state; the &bswap 0 key also saves */
+#define BSWAP_EFFECTIVE 0x02 /* RO — base XOR momentary holds */
 
 /* Accel values — same wire vocabulary as the QMK families (pd_accel over
  * mad_hid.c): x100 fixed-point floats, offset is SIGNED. */
@@ -579,6 +591,27 @@ static bool handle_gestures(uint8_t cmd, uint8_t value_id, uint8_t *payload,
     }
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
+static bool handle_ballswap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    switch (value_id) {
+    case BSWAP_SWAPPED:
+        if (cmd == CMD_SET) {
+            flask_ballswap_set_swapped(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_ballswap_swapped() ? 1 : 0);
+        return true;
+    case BSWAP_EFFECTIVE:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_ballswap_effective() ? 1 : 0);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL)
 static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
@@ -1006,6 +1039,10 @@ static bool handle_save(uint8_t channel) {
     case CH_LEADER:
         return flask_leader_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
+    case CH_BALLSWAP:
+        return flask_ballswap_save() == 0;
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
     case CH_GESTURES:
         return flask_gestures_save() == 0;
@@ -1050,6 +1087,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
         case CH_AUTOSCROLL:
             ok = handle_autoscroll(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
+        case CH_BALLSWAP:
+            ok = handle_ballswap(cmd, value_id, payload);
             break;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
@@ -1206,6 +1248,11 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     if (settings_name_steq(name, "rgbmap", NULL)) {
         return flask_rgb_settings_restore(len, read_cb, cb_arg);
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
+    if (settings_name_steq(name, "ballswap", NULL)) {
+        return flask_ballswap_settings_restore(len, read_cb, cb_arg);
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)

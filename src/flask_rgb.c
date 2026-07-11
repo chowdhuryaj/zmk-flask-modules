@@ -33,6 +33,16 @@
 #include <zmk/events/activity_state_changed.h>
 #include <zmk/activity.h>
 
+/* Strip power rail: boards like the Cyboard assimilator-bt gate LED VCC
+ * behind ZMK's ext-power driver, whose OFF state persists in settings and
+ * SURVIVES REFLASHING — firmware that renders perfectly still shows a dark
+ * board (bench 2026-07-11). When the board has such a node, kick it ON
+ * once settings have loaded; the driver saves the new state itself. */
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_ext_power_generic)
+#include <drivers/ext_power.h>
+#define FRGB_HAS_EXT_POWER 1
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) || !IS_ENABLED(CONFIG_ZMK_SPLIT)
 #include <zmk/keymap.h>
 #include <zmk/events/layer_state_changed.h>
@@ -212,6 +222,31 @@ static void frgb_render(struct k_work *work) {
 
 static void frgb_schedule_render(void) { k_work_submit(&frgb_render_work); }
 
+/* --- strip power kick (see the ext-power comment up top) --- */
+
+#if defined(FRGB_HAS_EXT_POWER)
+static void frgb_power_kick(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    const struct device *ext = DEVICE_DT_GET_ANY(zmk_ext_power_generic);
+
+    if (!device_is_ready(ext)) {
+        return;
+    }
+    if (frgb_enabled && ext_power_get(ext) < 1) {
+        LOG_INF("flask_rgb: enabling ext power for the LED strip");
+        ext_power_enable(ext); /* driver persists the new state itself */
+    }
+}
+static K_WORK_DELAYABLE_DEFINE(frgb_power_work, frgb_power_kick);
+
+/* Delayed past settings_load(): the ext-power driver restores a saved OFF
+ * state AFTER our SYS_INIT runs, so an immediate enable would be undone. */
+static void frgb_power_kick_schedule(void) { k_work_schedule(&frgb_power_work, K_SECONDS(3)); }
+#else
+static void frgb_power_kick_schedule(void) {}
+#endif
+
 /* Animation clock: advance the phase and re-render while an animated effect
  * is visible; stops itself otherwise (any effect/enable/wake change calls
  * frgb_anim_kick to restart it). */
@@ -288,6 +323,9 @@ void flask_rgb_set_enabled(bool on) {
     flask_rgb_split_send_enabled(on);
     frgb_schedule_render();
     frgb_anim_kick();
+    if (on) {
+        frgb_power_kick_schedule();
+    }
 }
 
 /* --- effect API (channel 0x21 values 0x04-0x08) --- */
@@ -412,6 +450,9 @@ void flask_rgb_sync_led(uint8_t layer, uint16_t led, const uint8_t hsv[3]) {
 void flask_rgb_sync_enabled(bool on) {
     K_SPINLOCK(&frgb_lock) { frgb_enabled = on; }
     frgb_schedule_render();
+    if (on) {
+        frgb_power_kick_schedule();
+    }
 }
 
 void flask_rgb_sync_fill(uint8_t layer, const uint8_t hsv[3]) {
@@ -567,6 +608,7 @@ static int flask_rgb_init(void) {
         return -ENODEV;
     }
     frgb_schedule_render();     /* dark until the map says otherwise */
+    frgb_power_kick_schedule(); /* un-gate strip VCC once settings settle */
     return 0;
 }
 

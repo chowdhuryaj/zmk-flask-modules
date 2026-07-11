@@ -231,6 +231,32 @@ config ZMK_BEHAVIOR_FLASK_GESTURES
       Keymap behavior holding a gesture open: &fges <set> (255 = follow
       the live active set).
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP := zmk,input-processor-flask-ballswap
+
+config ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP
+    bool "Flask trackball role-swap input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP))
+    depends on ZMK_POINTING
+    depends on INPUT
+    depends on SETTINGS
+    help
+      Live trackball role swap (Flask channel 0x1B): one instance fronts
+      each ball's physical listener chain; while a swap is in effect it
+      swallows motion and re-emits it from its own node, where a second
+      listener carries the other role's chain. Toggled state persists via
+      settings (survives power cycle and reflash); a momentary hold
+      composes by XOR.
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_BALLSWAP := zmk,behavior-flask-ballswap
+
+config ZMK_BEHAVIOR_FLASK_BALLSWAP
+    bool "Flask ball-swap behavior (&bswap)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_BALLSWAP))
+    depends on ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP
+    help
+      Keymap behavior driving flask_ballswap: &bswap 0 toggles the
+      persisted swap, &bswap 1 swaps while held.
+
 DT_COMPAT_ZMK_BEHAVIOR_FLASK_MACROS := zmk,behavior-flask-macros
 
 config ZMK_BEHAVIOR_FLASK_MACROS

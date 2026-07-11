@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+description: |
+  Flask trackball role-swap behavior. Param selects the mode — 0 toggles the
+  persisted swap (saved immediately; survives power cycle and reflash),
+  1 swaps only while the key is held.
+
+compatible: "zmk,behavior-flask-ballswap"
+
+properties:
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+
+binding-cells:
+  - param1
