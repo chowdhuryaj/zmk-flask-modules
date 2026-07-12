@@ -63,6 +63,16 @@ static struct {
 
 static struct k_spinlock cfg_lock;
 
+/* Save bookkeeping (under cfg_lock): which slots exist in settings, which
+ * changed since their last successful save. flask_macros_save() touches
+ * flash only for dirty slots — writing or blind-deleting all 32 keys on
+ * every save is the same NVS storm that killed the bench-4b combo save. */
+BUILD_ASSERT(FLASK_MACROS_SLOTS <= 64, "save bookkeeping is a single u64 bitmask");
+static uint64_t slots_saved;
+static uint64_t slots_dirty;
+static bool cfg_saved;
+static bool cfg_dirty;
+
 /* --- playback state (guarded by cfg_lock; raises outside it) --- */
 
 static int8_t play_slot = -1;
@@ -206,7 +216,10 @@ bool flask_macros_enabled(void) {
 }
 
 void flask_macros_set_enabled(bool on) {
-    K_SPINLOCK(&cfg_lock) { cfg.enabled = on; }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.enabled = on;
+        cfg_dirty = true;
+    }
     if (!on) {
         flask_macros_stop();
     }
@@ -221,7 +234,10 @@ uint16_t flask_macros_tap_ms(void) {
 
 void flask_macros_set_tap_ms(uint16_t ms) {
     ms = CLAMP(ms, TAP_MIN_MS, TAP_MAX_MS);
-    K_SPINLOCK(&cfg_lock) { cfg.tap_ms = ms; }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.tap_ms = ms;
+        cfg_dirty = true;
+    }
 }
 
 uint16_t flask_macros_wait_ms(void) {
@@ -233,7 +249,10 @@ uint16_t flask_macros_wait_ms(void) {
 
 void flask_macros_set_wait_ms(uint16_t ms) {
     ms = CLAMP(ms, WAIT_MIN_MS, WAIT_MAX_MS);
-    K_SPINLOCK(&cfg_lock) { cfg.wait_ms = ms; }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.wait_ms = ms;
+        cfg_dirty = true;
+    }
 }
 
 uint8_t flask_macros_slot_count(void) { return FLASK_MACROS_SLOTS; }
@@ -264,7 +283,10 @@ int flask_macros_step_set(uint8_t slot, uint8_t step, const struct flask_macro_s
         s.param = 0;
     }
 
-    K_SPINLOCK(&cfg_lock) { cfg.steps[slot][step] = s; }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.steps[slot][step] = s;
+        slots_dirty |= BIT64(slot);
+    }
     return 0;
 }
 
@@ -333,25 +355,44 @@ struct flask_macros_saved_cfg {
 
 int flask_macros_save(void) {
     struct flask_macros_saved_cfg saved = {.version = MACROS_SETTINGS_VERSION};
-    /* One slot's steps — copied under the lock, written outside it. */
+    /* One slot's steps — copied under the lock, written outside it. Static
+     * is safe: flask_proto's save queue runs at most one save at a time. */
     static struct flask_macro_step slot[FLASK_MACROS_STEPS];
+    uint64_t pending, saved_bits;
+    bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
         saved.enabled = cfg.enabled ? 1 : 0;
         saved.tap_ms = cfg.tap_ms;
         saved.wait_ms = cfg.wait_ms;
+        pending = slots_dirty;
+        saved_bits = slots_saved;
+        write_cfg = cfg_dirty || !cfg_saved;
+        /* Claimed: re-marked on failure below; an edit landing mid-save
+         * re-sets its bit and rides the next save. */
+        slots_dirty = 0;
+        cfg_dirty = false;
     }
 
-    int err = settings_save_one("flask/macros/cfg", &saved, sizeof(saved));
+    if (write_cfg) {
+        int err = settings_save_one("flask/macros/cfg", &saved, sizeof(saved));
 
-    if (err) {
-        LOG_ERR("flask/macros/cfg settings save failed: %d", err);
-        return err;
+        if (err) {
+            LOG_ERR("flask/macros/cfg settings save failed: %d", err);
+            K_SPINLOCK(&cfg_lock) {
+                cfg_dirty = true;
+                slots_dirty |= pending;
+            }
+            return err;
+        }
+        K_SPINLOCK(&cfg_lock) { cfg_saved = true; }
     }
 
-    for (int m = 0; m < FLASK_MACROS_SLOTS; m++) {
+    while (pending) {
+        int m = __builtin_ctzll(pending);
         int used = 0;
         char key[24];
+        int err = 0;
 
         K_SPINLOCK(&cfg_lock) {
             memcpy(slot, cfg.steps[m], sizeof(slot));
@@ -362,14 +403,27 @@ int flask_macros_save(void) {
             }
         }
 
+        bool on_flash = (saved_bits & BIT64(m)) != 0;
+
         snprintf(key, sizeof(key), "flask/macros/s%d", m);
-        err = (used == 0)
-                  ? settings_delete(key)
-                  : settings_save_one(key, slot, used * sizeof(struct flask_macro_step));
+        if (used == 0 && on_flash) {
+            err = settings_delete(key);
+        } else if (used > 0) {
+            err = settings_save_one(key, slot, used * sizeof(struct flask_macro_step));
+        } /* empty + never saved: nothing stored, nothing to delete */
         if (err) {
             LOG_ERR("%s settings save failed: %d", key, err);
+            K_SPINLOCK(&cfg_lock) { slots_dirty |= pending; }
             return err;
         }
+        K_SPINLOCK(&cfg_lock) {
+            if (used == 0) {
+                slots_saved &= ~BIT64(m);
+            } else {
+                slots_saved |= BIT64(m);
+            }
+        }
+        pending &= ~BIT64(m);
     }
     return 0;
 }
@@ -398,6 +452,8 @@ int flask_macros_settings_restore(const char *sub, size_t len, settings_read_cb 
             cfg.enabled = saved.enabled != 0;
             cfg.tap_ms = CLAMP(saved.tap_ms, TAP_MIN_MS, TAP_MAX_MS);
             cfg.wait_ms = CLAMP(saved.wait_ms, WAIT_MIN_MS, WAIT_MAX_MS);
+            cfg_saved = true;
+            cfg_dirty = false;
         }
         return 0;
     }
@@ -424,6 +480,8 @@ int flask_macros_settings_restore(const char *sub, size_t len, settings_read_cb 
             memcpy(cfg.steps[idx], steps, len);
             memset(&cfg.steps[idx][n], 0,
                    (FLASK_MACROS_STEPS - n) * sizeof(struct flask_macro_step));
+            slots_saved |= BIT64(idx);
+            slots_dirty &= ~BIT64(idx);
         }
         return 0;
     }

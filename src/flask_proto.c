@@ -7,6 +7,14 @@
  * command byte replaced by 0xFF. Setters clamp before applying and echo the
  * applied value — callers adopt the echo.
  *
+ * SAVE is the one command that hits flash (settings/NVS), so it runs on a
+ * dedicated work queue and its echo is raised from there once the writes
+ * have landed — the received event fires in the transport's delivery
+ * context (USB set_report callback on the ~1 KB USB workqueue stack; BT RX
+ * thread for BLE), and running a multi-slot settings save inline there
+ * wedged the whole board (bench 4b, 2026-07-12: combos save = instant
+ * death — still enumerated, nothing functional).
+ *
  * Transport: zzeneg/zmk-raw-hid (USB + BT), which already defaults to the
  * Flask HID identity (usage page 0xFF60, usage 0x61, 32-byte reports).
  *
@@ -18,6 +26,7 @@
 
 #include <string.h>
 
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/logging/log.h>
@@ -1099,6 +1108,34 @@ static bool handle_save(uint8_t channel) {
     }
 }
 
+/* Dedicated context for handle_save(): its settings writes are synchronous
+ * flash ops (radio-synced against the BLE controller, NVS GC can amplify
+ * one save into a sector copy) and must never run on the thread that
+ * delivered the HID frame. One save in flight is the legal maximum — the
+ * app transport is single-in-flight and waits for the echo. */
+K_THREAD_STACK_DEFINE(flask_save_stack, 2048);
+static struct k_work_q flask_save_q;
+static struct k_work flask_save_work;
+static uint8_t save_frame[CONFIG_RAW_HID_REPORT_SIZE];
+static atomic_t save_busy;
+
+static void save_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (!handle_save(save_frame[1])) {
+        save_frame[0] = CMD_UNHANDLED;
+    }
+
+    /* Clear BEFORE raising: the app sends nothing until it sees this echo,
+     * so save_frame cannot be overwritten mid-send — but if the clear came
+     * after and this low-priority thread got preempted between the two,
+     * the app's next save would bounce off a stale busy flag. */
+    atomic_clear(&save_busy);
+
+    struct raw_hid_sent_event sent = {.data = save_frame, .length = sizeof(save_frame)};
+    raise_raw_hid_sent_event(sent);
+}
+
 static int flask_proto_received(const zmk_event_t *eh) {
     struct raw_hid_received_event *event = as_raw_hid_received_event(eh);
 
@@ -1181,7 +1218,16 @@ static int flask_proto_received(const zmk_event_t *eh) {
         }
         break;
     case CMD_SAVE:
-        ok = handle_save(channel);
+        /* Deferred: the echo comes from the save queue after the flash
+         * writes land. A save already in flight (app retry after a
+         * timeout) echoes unhandled instead of queueing behind it. */
+        if (atomic_cas(&save_busy, 0, 1)) {
+            memcpy(save_frame, reply, sizeof(save_frame));
+            if (k_work_submit_to_queue(&flask_save_q, &flask_save_work) >= 0) {
+                return ZMK_EV_EVENT_BUBBLE;
+            }
+            atomic_clear(&save_busy);
+        }
         break;
     default:
         break;
@@ -1348,3 +1394,14 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(flask, "flask", NULL, flask_settings_set, NULL, NULL);
+
+static int flask_proto_init(void) {
+    static const struct k_work_queue_config qcfg = {.name = "flask_save"};
+
+    k_work_init(&flask_save_work, save_work_handler);
+    k_work_queue_start(&flask_save_q, flask_save_stack, K_THREAD_STACK_SIZEOF(flask_save_stack),
+                       K_LOWEST_APPLICATION_THREAD_PRIO, &qcfg);
+    return 0;
+}
+
+SYS_INIT(flask_proto_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);

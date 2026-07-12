@@ -81,6 +81,16 @@ static uint8_t slot_len[FLASK_COMBOS_SLOTS];
 
 static struct k_spinlock cfg_lock;
 
+/* Save bookkeeping (under cfg_lock): which slots exist in settings, which
+ * changed since their last successful save. flask_combos_save() touches
+ * flash only for dirty slots — the old save wrote or blind-deleted all 64
+ * keys every time (~65 NVS ops), which is what the bench-4b combo save
+ * died on. */
+static uint64_t slots_saved;
+static uint64_t slots_dirty;
+static bool cfg_saved;
+static bool cfg_dirty;
+
 static uint8_t slot_key_count(const struct flask_combo_slot *s) {
     uint8_t n = 0;
 
@@ -406,7 +416,10 @@ bool flask_combos_enabled(void) {
 }
 
 void flask_combos_set_enabled(bool on) {
-    K_SPINLOCK(&cfg_lock) { cfg.enabled = on; }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.enabled = on;
+        cfg_dirty = true;
+    }
 }
 
 uint16_t flask_combos_timeout_ms(void) {
@@ -418,7 +431,10 @@ uint16_t flask_combos_timeout_ms(void) {
 
 void flask_combos_set_timeout_ms(uint16_t ms) {
     ms = CLAMP(ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
-    K_SPINLOCK(&cfg_lock) { cfg.timeout_ms = ms; }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.timeout_ms = ms;
+        cfg_dirty = true;
+    }
 }
 
 uint8_t flask_combos_slot_count(void) { return FLASK_COMBOS_SLOTS; }
@@ -446,6 +462,7 @@ int flask_combos_slot_set(uint8_t idx, const struct flask_combo_slot *in) {
 
     K_SPINLOCK(&cfg_lock) {
         cfg.slots[idx] = s;
+        slots_dirty |= BIT64(idx);
         rebuild_lookup();
     }
     return 0;
@@ -483,31 +500,65 @@ static bool slot_is_empty(const struct flask_combo_slot *s) {
 
 int flask_combos_save(void) {
     struct flask_combos_saved_cfg saved = {.version = COMBOS_SETTINGS_VERSION};
-    struct flask_combo_slot slots[FLASK_COMBOS_SLOTS];
+    /* Static keeps the table copy off the save-queue stack; safe because
+     * flask_proto's save queue runs at most one save at a time. */
+    static struct flask_combo_slot slots[FLASK_COMBOS_SLOTS];
+    uint64_t pending, saved_bits;
+    bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
         saved.enabled = cfg.enabled ? 1 : 0;
         saved.timeout_ms = cfg.timeout_ms;
         memcpy(slots, cfg.slots, sizeof(slots));
+        pending = slots_dirty;
+        saved_bits = slots_saved;
+        write_cfg = cfg_dirty || !cfg_saved;
+        /* Claimed: re-marked on failure below; an edit landing mid-save
+         * re-sets its bit and rides the next save. */
+        slots_dirty = 0;
+        cfg_dirty = false;
     }
 
-    int err = settings_save_one("flask/combos/cfg", &saved, sizeof(saved));
+    if (write_cfg) {
+        int err = settings_save_one("flask/combos/cfg", &saved, sizeof(saved));
 
-    if (err) {
-        LOG_ERR("flask/combos/cfg settings save failed: %d", err);
-        return err;
-    }
-
-    for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
-        char key[24];
-
-        snprintf(key, sizeof(key), "flask/combos/s%d", i);
-        err = slot_is_empty(&slots[i]) ? settings_delete(key)
-                                       : settings_save_one(key, &slots[i], sizeof(slots[i]));
         if (err) {
-            LOG_ERR("%s settings save failed: %d", key, err);
+            LOG_ERR("flask/combos/cfg settings save failed: %d", err);
+            K_SPINLOCK(&cfg_lock) {
+                cfg_dirty = true;
+                slots_dirty |= pending;
+            }
             return err;
         }
+        K_SPINLOCK(&cfg_lock) { cfg_saved = true; }
+    }
+
+    while (pending) {
+        int i = __builtin_ctzll(pending);
+        bool empty = slot_is_empty(&slots[i]);
+        bool on_flash = (saved_bits & BIT64(i)) != 0;
+        char key[24];
+        int err = 0;
+
+        snprintf(key, sizeof(key), "flask/combos/s%d", i);
+        if (empty && on_flash) {
+            err = settings_delete(key);
+        } else if (!empty) {
+            err = settings_save_one(key, &slots[i], sizeof(slots[i]));
+        } /* empty + never saved: nothing stored, nothing to delete */
+        if (err) {
+            LOG_ERR("%s settings save failed: %d", key, err);
+            K_SPINLOCK(&cfg_lock) { slots_dirty |= pending; }
+            return err;
+        }
+        K_SPINLOCK(&cfg_lock) {
+            if (empty) {
+                slots_saved &= ~BIT64(i);
+            } else {
+                slots_saved |= BIT64(i);
+            }
+        }
+        pending &= ~BIT64(i);
     }
     return 0;
 }
@@ -535,6 +586,8 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
         K_SPINLOCK(&cfg_lock) {
             cfg.enabled = saved.enabled != 0;
             cfg.timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+            cfg_saved = true;
+            cfg_dirty = false;
         }
         return 0;
     }
@@ -557,6 +610,8 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
         }
         K_SPINLOCK(&cfg_lock) {
             cfg.slots[idx] = s;
+            slots_saved |= BIT64(idx);
+            slots_dirty &= ~BIT64(idx);
             rebuild_lookup();
         }
         return 0;
