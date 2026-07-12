@@ -292,12 +292,12 @@ void flask_rgb_bulk_resync(void) {
 static uint8_t frgb_discover_func(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   struct bt_gatt_discover_params *params) {
     if (attr == NULL) {
-        /* No flask_rgb service/characteristic on THIS connection. That is
-         * expected when the visited central-role conn is not the split
-         * peripheral at all (zmk-ble-mouse-host makes a paired BLE mouse a
-         * central-role conn too) — retry lets the round-robin cursor in
-         * frgb_start_discovery move on to the next central conn, and also
-         * covers a peripheral that reflashes mid-session. */
+        /* Procedure COMPLETE with no flask_rgb service/characteristic on
+         * this connection — expected when the visited central-role conn is
+         * not the split peripheral (a paired BLE mouse is central-role
+         * too). The params are ours again; retry lets the round-robin
+         * cursor move on, and covers a peripheral reflashed mid-session. */
+        frgb_disc_conn = NULL;
         k_work_schedule(&frgb_discover_work, K_SECONDS(5));
         return BT_GATT_ITER_STOP;
     }
@@ -305,6 +305,8 @@ static uint8_t frgb_discover_func(struct bt_conn *conn, const struct bt_gatt_att
     if (params->type == BT_GATT_DISCOVER_PRIMARY) {
         const struct bt_gatt_service_val *svc = attr->user_data;
 
+        /* Same procedure continues (params stay owned by the stack until
+         * the characteristic phase completes) — keep the busy guard up. */
         memcpy(&frgb_disc_uuid, &frgb_chr_uuid, sizeof(frgb_disc_uuid));
         params->uuid = &frgb_disc_uuid.uuid;
         params->start_handle = attr->handle + 1;
@@ -312,12 +314,15 @@ static uint8_t frgb_discover_func(struct bt_conn *conn, const struct bt_gatt_att
         params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
         if (bt_gatt_discover(conn, params) < 0) {
             LOG_WRN("flask_rgb: characteristic discovery failed to start");
+            frgb_disc_conn = NULL;
+            k_work_schedule(&frgb_discover_work, K_SECONDS(5));
         }
         return BT_GATT_ITER_STOP;
     }
 
     const struct bt_gatt_chrc *chrc = attr->user_data;
 
+    frgb_disc_conn = NULL;
     frgb_link.conn = bt_conn_ref(conn);
     frgb_link.handle = chrc->value_handle;
     frgb_link.ready = true;
@@ -354,10 +359,26 @@ static void frgb_collect_central_conns(struct bt_conn *c, void *data) {
  * cursor skips one candidate for one round). */
 static struct bt_conn *frgb_last_tried;
 
+/* Discovery-in-flight guard. bt_gatt_discover OWNS frgb_disc_params until
+ * the procedure completes — restarting a discovery (the 5 s retry) while
+ * one is still live REASSIGNS the params under the stack and corrupts the
+ * BT host (bench 2026-07-12: central hard-hung, powered but no input,
+ * minutes after boot with a slow/absent peripheral link keeping the retry
+ * loop hot). Non-NULL = the conn whose discovery owns the params; compared
+ * by identity only. Cleared on completion, immediate error, or that conn's
+ * disconnect. */
+static struct bt_conn *frgb_disc_conn;
+
 static void frgb_start_discovery(struct k_work *work) {
     ARG_UNUSED(work);
 
     struct frgb_conn_scan scan = {0};
+
+    /* A live discovery owns frgb_disc_params — never restart over it. Its
+     * completion (or its conn's disconnect) re-arms the retry. */
+    if (frgb_disc_conn != NULL) {
+        return;
+    }
 
     bt_conn_foreach(BT_CONN_TYPE_LE, frgb_collect_central_conns, &scan);
 
@@ -387,10 +408,13 @@ static void frgb_start_discovery(struct k_work *work) {
         .end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE,
         .type = BT_GATT_DISCOVER_PRIMARY,
     };
+    frgb_disc_conn = conn;
     int err = bt_gatt_discover(conn, &frgb_disc_params);
 
     if (err) {
         LOG_WRN("flask_rgb: service discovery failed: %d", err);
+        frgb_disc_conn = NULL;
+        k_work_schedule(&frgb_discover_work, K_SECONDS(5));
     }
 }
 
