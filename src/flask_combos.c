@@ -568,10 +568,17 @@ static int flask_combos_init(void) {
     for (int i = 0; i < MAX_ACTIVE; i++) {
         actives[i].slot = 0xFF;
     }
+    /* Empty slots must read back as pos[]=NONE, not 0 — zero-filled BSS
+     * means "position 0, eight times", which the app faithfully rendered
+     * as phantom entries on every draft (bench 2026-07-12; flask_leader
+     * shipped with the same init from day one). The matcher never cared
+     * (usage==0 keeps a slot out of the lookup), the wire echo did. */
+    for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
+        memset(cfg.slots[i].pos, FLASK_COMBOS_POS_NONE, FLASK_COMBOS_KEYS);
+    }
     k_work_init_delayable(&timeout_task, timeout_handler);
-    /* Table starts empty; lookup is already all-zero. Settings restore
-     * (via flask_proto's handler) fills it in before the first key event
-     * matters. */
+    /* Lookup is already all-zero. Settings restore (via flask_proto's
+     * handler) fills the table in before the first key event matters. */
     return 0;
 }
 
