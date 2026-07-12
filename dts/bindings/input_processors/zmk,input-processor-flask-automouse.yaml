@@ -1,0 +1,32 @@
+description: "Flask auto-mouse layer — motion threshold, timeout/latch, extend-on-key; runtime-tunable over the Flask protocol (channel 0x1B)"
+
+compatible: "zmk,input-processor-flask-automouse"
+
+include: ip_zero_param.yaml
+
+properties:
+  layer:
+    type: int
+    required: true
+    description: "Layer INDEX the ball motion activates (the app's Target-layer dropdown writes this)"
+  timeout-ms:
+    type: int
+    default: 750
+    description: "Layer drops this long after the last motion. 0 = latch until a key transparent on the layer is pressed (that key is swallowed)"
+  threshold:
+    type: int
+    default: 0
+    description: "Accumulated |dx|+|dy| counts before the layer triggers; 0 = any motion (stock temp-layer feel)"
+  no-extend-on-key:
+    type: boolean
+    description: "Do NOT re-arm the timeout when a non-transparent key on the layer is pressed (default is to extend)"
+  require-prior-idle-ms:
+    type: int
+    default: 0
+    description: "Motion within this window after a keycode never triggers the layer (mid-typing guard)"
+  excluded-positions:
+    type: array
+    description: "Key positions that never deactivate/swallow — always-on mouse buttons that are transparent ON the layer; they extend instead"
+  start-disabled:
+    type: boolean
+    description: "Boot with the auto-mouse engine off (runtime enable over the Flask protocol)"

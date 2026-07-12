@@ -26,6 +26,10 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_LEADER app PRIVATE src/behavior_flask_leader.c)
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES app PRIVATE src/input_processor_flask_gestures.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_GESTURES app PRIVATE src/behavior_flask_gestures.c)
+  # Links after combos/leader on purpose: the automouse position listener
+  # must see key events AFTER those capture engines, so its latch-swallow
+  # decision matches what actually reaches the keymap.
+  target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE app PRIVATE src/input_processor_flask_automouse.c)
   if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
     target_sources(app PRIVATE src/flask_rgb_split_central.c)
   endif()

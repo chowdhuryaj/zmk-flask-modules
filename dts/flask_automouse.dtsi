@@ -1,0 +1,27 @@
+/*
+ * Default flask_automouse instance. Wire it into the cursor ball's listener
+ * chain from the consuming keymap where &zip_temp_layer used to sit (after
+ * accel/scalers is fine — it only OBSERVES event values):
+ *
+ *   #include <flask_automouse.dtsi>
+ *   &flask_automouse {
+ *       layer = <3>;
+ *       timeout-ms = <750>;
+ *       require-prior-idle-ms = <150>;
+ *       excluded-positions = <60 61 66 67>;
+ *   };
+ *   // in the cursor listener:
+ *   //   input-processors = <... &zip_xy_scaler 1 1 &flask_automouse>;
+ *
+ * The same node slots into every chain copy (e.g. a ballswap-out listener) —
+ * the engine state is shared.
+ */
+
+/ {
+    flask_automouse: flask_automouse {
+        compatible = "zmk,input-processor-flask-automouse";
+        #input-processor-cells = <0>;
+        layer = <0>;
+        status = "okay";
+    };
+};

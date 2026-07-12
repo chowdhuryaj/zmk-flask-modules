@@ -76,6 +76,10 @@
 #include <flask_ballswap/flask_ballswap.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE)
+#include <flask_automouse/flask_automouse.h>
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
 #include <flask_gestures/flask_gestures.h>
 #endif
@@ -129,8 +133,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * usage-hold / macro / BEHAVIOR-by-local-id with two params; legacy 0x10
  * keeps the usage-only view) + rgbmap runtime LED order (RGBMAP_LEDORDER
  * 0x0A — chunked LED→position table; the wizard's measured map lives on
- * the device now, so the reactive overlay is right without a reflash). */
-#define FLASK_PROTO_VERSION 12
+ * the device now, so the reactive overlay is right without a reflash).
+ * v13 (2026-07-12): auto-mouse channel 0x1B (flask_automouse, QMK autoMouse
+ * wire shape — enabled 0x01, timeout ms 0x02 [0 = latch until a transparent
+ * key, which is swallowed], threshold 0x03, layer index 0x04, plus the
+ * ZMK-line extend-on-key 0x05; SAVE persists via "flask/automouse").
+ * Replaces &zip_temp_layer on the Imprint's cursor chains. */
+#define FLASK_PROTO_VERSION 13
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -147,13 +156,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_DRAGSCROLL 0x15
 #define CH_LEADER 0x19 /* QMK leader channel — shared timeout id, ZMK slot frame (v10) */
 #define CH_AUTOSCROLL 0x1A
+#define CH_AUTOMOUSE 0x1B /* QMK autoMouse channel — same wire shape (v13) */
 
 #define CH_RGBMAP 0x21
 #define CH_KEYSTATE 0x23
 #define CH_COMBOS 0x24
 #define CH_MACROS 0x25
 #define CH_SCROLLSNAP 0x26 /* ZMK-line: flask_scrollsnap (v9) */
-#define CH_BALLSWAP 0x27 /* ZMK-line: flask_ballswap (v11); 0x1B-0x1F are QMK's */
+#define CH_BALLSWAP 0x27 /* ZMK-line: flask_ballswap (v11); 0x1C-0x1F stay QMK-only */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -219,9 +229,18 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define AS_STATE 0x05       /* live: GET = stepped level; SET stops */
 #define AS_STOP_ON_KEY 0x06
 
-/* Ballswap values (channel 0x1B, ZMK line — no QMK equivalent) */
+/* Ballswap values (channel 0x27, ZMK line — no QMK equivalent) */
 #define BSWAP_SWAPPED 0x01   /* base state; the &bswap 0 key also saves */
 #define BSWAP_EFFECTIVE 0x02 /* RO — base XOR momentary holds */
+
+/* Auto-mouse values (channel 0x1B) — same wire vocabulary as the QMK
+ * families (flaskproto.js V.amEnabled/amTimeout/amThreshold/amLayer);
+ * extend-on-key is an imprint-line addition (append-only). */
+#define AM_ENABLED 0x01
+#define AM_TIMEOUT 0x02   /* ms; 0 = latch until a transparent key (swallowed) */
+#define AM_THRESHOLD 0x03 /* accumulated counts before trigger; 0 = any motion */
+#define AM_LAYER 0x04     /* layer INDEX */
+#define AM_EXTEND 0x05    /* non-transparent key on the layer re-arms the timeout */
 
 /* Accel values — same wire vocabulary as the QMK families (pd_accel over
  * mad_hid.c): x100 fixed-point floats, offset is SIGNED. */
@@ -650,6 +669,67 @@ static bool handle_gestures(uint8_t cmd, uint8_t value_id, uint8_t *payload,
     }
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE)
+static bool handle_automouse(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_automouse_params p;
+
+    if (flask_automouse_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case AM_ENABLED:
+            p.enabled = (v != 0);
+            break;
+        case AM_TIMEOUT:
+            p.timeout_ms = v;
+            break;
+        case AM_THRESHOLD:
+            p.threshold = v;
+            break;
+        case AM_LAYER:
+            p.layer = (uint8_t)MIN(v, 255);
+            break;
+        case AM_EXTEND:
+            p.extend_on_key = (v != 0);
+            break;
+        default:
+            return false;
+        }
+        flask_automouse_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_automouse_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case AM_ENABLED:
+        wr_u16(payload, p.enabled ? 1 : 0);
+        return true;
+    case AM_TIMEOUT:
+        wr_u16(payload, p.timeout_ms);
+        return true;
+    case AM_THRESHOLD:
+        wr_u16(payload, p.threshold);
+        return true;
+    case AM_LAYER:
+        wr_u16(payload, p.layer);
+        return true;
+    case AM_EXTEND:
+        wr_u16(payload, p.extend_on_key ? 1 : 0);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
 static bool handle_ballswap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
@@ -1178,6 +1258,21 @@ static bool handle_save(uint8_t channel) {
     case CH_BALLSWAP:
         return flask_ballswap_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE)
+    case CH_AUTOMOUSE: {
+        struct flask_automouse_saved saved = {.version = AUTOMOUSE_SETTINGS_VERSION};
+
+        if (flask_automouse_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/automouse", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/automouse settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
     case CH_GESTURES:
         return flask_gestures_save() == 0;
@@ -1255,6 +1350,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
         case CH_BALLSWAP:
             ok = handle_ballswap(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE)
+        case CH_AUTOMOUSE:
+            ok = handle_automouse(cmd, value_id, payload);
             break;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
@@ -1428,6 +1528,11 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
     if (settings_name_steq(name, "ballswap", NULL)) {
         return flask_ballswap_settings_restore(len, read_cb, cb_arg);
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE)
+    if (settings_name_steq(name, "automouse", NULL)) {
+        return flask_automouse_settings_restore(len, read_cb, cb_arg);
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)

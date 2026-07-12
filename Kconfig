@@ -63,6 +63,22 @@ config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP
       for a duration/event count. Every knob is live over the Flask
       protocol (channel 0x26).
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE := zmk,input-processor-flask-automouse
+
+config ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE
+    bool "Flask auto-mouse layer input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Runtime-tunable auto-mouse layer (replaces &zip_temp_layer on the
+      cursor chain): ball motion past a movement threshold activates a
+      layer; a timeout drops it, or — timeout 0 — it latches until a key
+      transparent on the layer is pressed (that key is swallowed).
+      Non-transparent keys on the layer can extend the timeout. All knobs
+      live over the Flask protocol (channel 0x1B, the QMK autoMouse wire
+      shape) and persist via settings.
+
 DT_COMPAT_FLASK_RGB := flask,rgb
 
 config ZMK_FLASK_RGB
