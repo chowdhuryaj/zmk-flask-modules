@@ -39,6 +39,15 @@ static struct {
 static struct bt_gatt_discover_params frgb_disc_params;
 static struct bt_uuid_128 frgb_disc_uuid;
 
+/* Discovery-in-flight guard. bt_gatt_discover OWNS frgb_disc_params until
+ * the procedure completes — restarting a discovery (the 5 s retry) while
+ * one is still live REASSIGNS the params under the stack and corrupts the
+ * BT host (bench 2026-07-12: central hard-hung, powered but no input,
+ * minutes after boot). Non-NULL = the conn whose discovery owns the
+ * params; compared by identity only, never dereferenced. Cleared on
+ * completion, immediate error, or that conn's disconnect. */
+static struct bt_conn *frgb_disc_conn;
+
 /* --- TX state (latest-wins flags + LED edit queue + bulk cursor) --- */
 
 struct frgb_led_frame {
@@ -358,16 +367,6 @@ static void frgb_collect_central_conns(struct bt_conn *c, void *data) {
  * in a static pool, so a stale pointer compares safely (worst case the
  * cursor skips one candidate for one round). */
 static struct bt_conn *frgb_last_tried;
-
-/* Discovery-in-flight guard. bt_gatt_discover OWNS frgb_disc_params until
- * the procedure completes — restarting a discovery (the 5 s retry) while
- * one is still live REASSIGNS the params under the stack and corrupts the
- * BT host (bench 2026-07-12: central hard-hung, powered but no input,
- * minutes after boot with a slow/absent peripheral link keeping the retry
- * loop hot). Non-NULL = the conn whose discovery owns the params; compared
- * by identity only. Cleared on completion, immediate error, or that conn's
- * disconnect. */
-static struct bt_conn *frgb_disc_conn;
 
 static void frgb_start_discovery(struct k_work *work) {
     ARG_UNUSED(work);
