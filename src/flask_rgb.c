@@ -95,9 +95,28 @@ BUILD_ASSERT(ARRAY_SIZE(frgb_led_pos) == FRGB_TOTAL,
              "flask,rgb key-positions must have total-leds entries");
 #endif
 
-/* position → LED (0xFF = no LED under that position); built at init. */
+/* LED → keymap position, RUNTIME-editable since v12 (wire value 0x0A):
+ * the app's "Map LEDs → keys" wizard pushes the measured order here, so
+ * the reactive overlay (leader candidate lighting) is correct without a
+ * keymap edit + reflash. Seeded from the node's key-positions property
+ * (identity without it); persisted as its own settings entry
+ * ("flask/ledorder") on SAVE. 0xFF = no key under that LED (underglow). */
 BUILD_ASSERT(FRGB_TOTAL <= 255, "flask,rgb overlay table indexes LEDs as bytes");
+static uint8_t frgb_led_order[FRGB_TOTAL];
+
+/* position → LED (0xFF = no LED under that position); rebuilt whenever
+ * frgb_led_order changes. */
 static uint8_t frgb_pos2led[256];
+
+/* Callers hold frgb_lock (or run before threads at init). */
+static void frgb_rebuild_pos2led(void) {
+    memset(frgb_pos2led, 0xFF, sizeof(frgb_pos2led));
+    for (uint16_t led = 0; led < FRGB_TOTAL; led++) {
+        if (frgb_led_order[led] != 0xFF) {
+            frgb_pos2led[frgb_led_order[led]] = led;
+        }
+    }
+}
 
 static struct led_rgb frgb_pixels[FRGB_LOCAL];
 static struct k_work frgb_render_work;
@@ -376,6 +395,29 @@ void flask_rgb_effect_snapshot(uint8_t *effect, uint8_t *speed, uint8_t hsv[3],
     }
 }
 
+/* --- runtime LED order (v12, wire value 0x0A) --- */
+
+int flask_rgb_led_order_get(uint16_t start, uint8_t *out, uint8_t count) {
+    if (out == NULL || start >= FRGB_TOTAL) {
+        return -EINVAL;
+    }
+    count = MIN(count, FRGB_TOTAL - start);
+    K_SPINLOCK(&frgb_lock) { memcpy(out, &frgb_led_order[start], count); }
+    return count;
+}
+
+int flask_rgb_led_order_set(uint16_t start, const uint8_t *pos, uint8_t count) {
+    if (pos == NULL || start >= FRGB_TOTAL) {
+        return -EINVAL;
+    }
+    count = MIN(count, FRGB_TOTAL - start);
+    K_SPINLOCK(&frgb_lock) {
+        memcpy(&frgb_led_order[start], pos, count);
+        frgb_rebuild_pos2led();
+    }
+    return count;
+}
+
 /* --- reactive overlay (position-addressed; transient, never persisted) --- */
 
 void flask_rgb_overlay_positions(const uint8_t *positions, uint8_t count, const uint8_t hsv[3]) {
@@ -526,8 +568,38 @@ int flask_rgb_save(void) {
 
     if (err) {
         LOG_ERR("flask/rgbmap settings save failed: %d", err);
+        return err;
+    }
+
+    /* Runtime LED order rides its own entry (v12) — small, and the big
+     * map blob keeps its shape (no migration). */
+    uint8_t order[FRGB_TOTAL];
+
+    K_SPINLOCK(&frgb_lock) { memcpy(order, frgb_led_order, sizeof(order)); }
+    err = settings_save_one("flask/ledorder", order, sizeof(order));
+    if (err) {
+        LOG_ERR("flask/ledorder settings save failed: %d", err);
     }
     return err;
+}
+
+/* Restore the runtime LED order ("flask/ledorder", v12). Size mismatch =
+ * a different board shape — keep the DT/identity seed. */
+int flask_rgb_ledorder_restore(size_t len, settings_read_cb read_cb, void *cb_arg) {
+    uint8_t order[FRGB_TOTAL];
+
+    if (len != sizeof(order)) {
+        LOG_WRN("flask/ledorder settings size mismatch (%d != %d)", (int)len, (int)sizeof(order));
+        return 0;
+    }
+    if (read_cb(cb_arg, order, sizeof(order)) < 0) {
+        return -EIO;
+    }
+    K_SPINLOCK(&frgb_lock) {
+        memcpy(frgb_led_order, order, sizeof(frgb_led_order));
+        frgb_rebuild_pos2led();
+    }
+    return 0;
 }
 
 /* Restore entry — called from flask_proto.c's "flask" settings handler.
@@ -596,18 +668,17 @@ ZMK_SUBSCRIPTION(flask_rgb_activity, zmk_activity_state_changed);
 /* --- init --- */
 
 static int flask_rgb_init(void) {
-    /* position → LED reverse map for the overlay API: from the node's
-     * key-positions property, identity fallback without it. */
-    memset(frgb_pos2led, 0xFF, sizeof(frgb_pos2led));
+    /* Seed the LED→position order from the node's key-positions property
+     * (identity fallback), then build the reverse map. A stored runtime
+     * order overrides both when settings load. */
 #if DT_NODE_HAS_PROP(FRGB_NODE, key_positions)
-    for (uint16_t led = 0; led < FRGB_TOTAL; led++) {
-        frgb_pos2led[frgb_led_pos[led]] = led;
-    }
+    memcpy(frgb_led_order, frgb_led_pos, FRGB_TOTAL);
 #else
-    for (uint16_t led = 0; led < MIN(FRGB_TOTAL, 256); led++) {
-        frgb_pos2led[led] = led;
+    for (uint16_t led = 0; led < FRGB_TOTAL; led++) {
+        frgb_led_order[led] = led < 255 ? (uint8_t)led : 0xFF;
     }
 #endif
+    frgb_rebuild_pos2led();
     k_work_init(&frgb_render_work, frgb_render);
     k_work_init_delayable(&frgb_anim_work, frgb_anim_tick);
     if (!device_is_ready(frgb_strip)) {

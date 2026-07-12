@@ -70,6 +70,17 @@ int flask_rgb_save(void);
  * the "rgbmap" leaf. Shape mismatches are ignored (map reseeds dark). */
 int flask_rgb_settings_restore(size_t len, settings_read_cb read_cb, void *cb_arg);
 
+/* Runtime LED→keymap-position order (v12, wire value 0x0A): the app's
+ * measured map, chunked reads/writes. 0xFF = no key under that LED.
+ * Setter rebuilds the overlay's position→LED table live; persisted by
+ * flask_rgb_save as "flask/ledorder". Both return the count served, or
+ * -EINVAL past the end. */
+int flask_rgb_led_order_get(uint16_t start, uint8_t *out, uint8_t count);
+int flask_rgb_led_order_set(uint16_t start, const uint8_t *pos, uint8_t count);
+
+/* Restore hook for the "ledorder" leaf. */
+int flask_rgb_ledorder_restore(size_t len, settings_read_cb read_cb, void *cb_arg);
+
 /* --- split-sync internal surface (module-private in spirit) --- */
 
 /* Peripheral ingest: called by the GATT write handler. */

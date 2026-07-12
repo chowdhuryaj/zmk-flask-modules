@@ -3,18 +3,25 @@
  * Vial's dynamic combo entries (proto channel 0x24).
  *
  * ZMK's own combos are const devicetree config; ZMK Studio has no combo RPC.
- * This module keeps a runtime slot table (32 slots x up to 4 key positions +
- * one encoded HID usage output) and matches it with the same capture engine
- * as zmk's app/src/combo.c: position events are captured while a combo
- * candidate is alive, released/re-raised on non-match, swallowed on match.
- * A matched combo raises zmk_keycode_state_changed from the slot's encoded
- * usage (keycode + modifiers — Vial output parity; no behavior plumbing).
+ * This module keeps a runtime slot table (Kconfig-sized positions per slot)
+ * and matches it with the same capture engine as zmk's app/src/combo.c:
+ * position events are captured while a combo candidate is alive,
+ * released/re-raised on non-match, swallowed on match.
+ *
+ * Outputs are TYPED since v12: a matched slot can (1) hold an encoded HID
+ * usage for the combo's duration (Vial parity — press on match, release on
+ * the first combo key up), (2) play a flask_macros slot, or (3) invoke ANY
+ * Studio-addressable behavior by local id with two params (tap-holds,
+ * layer keys — the behavior gets pressed on match and released on the
+ * first combo key up, with the first combo position as its event
+ * position, so hold-tap timing works).
  *
  * Coexists with devicetree combos: this module's listener runs before the
  * core combo listener (module sources link before app sources), so runtime
  * slots get first look and everything they release or re-raise still reaches
  * the core combo engine untouched. A runtime slot that duplicates a DT
- * combo's positions simply shadows it.
+ * combo's positions simply shadows it. The runtime enable flag governs ONLY
+ * runtime slots — devicetree combos have no off switch.
  *
  * Central-only on splits: the central raises position events for peripheral
  * keys too (absolute positions), and it owns the HID endpoint the output
@@ -37,13 +44,29 @@
 #define FLASK_COMBOS_KEYS CONFIG_ZMK_FLASK_COMBOS_KEYS
 #define FLASK_COMBOS_POS_NONE 0xFF
 
+/* Typed combo output (v12). USAGE holds param1 (ZMK keymap encoding:
+ * usage id bits 0-15, page bits 16-23, modifiers bits 24-31) for the
+ * combo's duration. MACRO plays flask_macros slot param1 on match.
+ * BEHAVIOR invokes the Studio-addressable behavior `behavior_id`
+ * (zmk_behavior_local_id_t) with param1/param2 — pressed on match,
+ * released on the first combo key up. */
+enum flask_combo_action {
+    FLASK_COMBO_OUT_NONE = 0,
+    FLASK_COMBO_OUT_USAGE = 1,
+    FLASK_COMBO_OUT_MACRO = 2,
+    FLASK_COMBO_OUT_BEHAVIOR = 3,
+};
+#define FLASK_COMBO_OUT_MAX FLASK_COMBO_OUT_BEHAVIOR
+
 /* One runtime combo: up to FLASK_COMBOS_KEYS key positions (0xFF = unused)
- * and the encoded HID usage it emits (ZMK keymap encoding: usage id bits
- * 0-15, usage page bits 16-23, modifiers bits 24-31). A slot is live when
- * usage != 0 and at least two positions are set. */
+ * plus a typed output. A slot is live when action != NONE and at least two
+ * positions are set. */
 struct flask_combo_slot {
     uint8_t pos[FLASK_COMBOS_KEYS];
-    uint32_t usage;
+    uint8_t action;
+    uint16_t behavior_id;
+    uint32_t param1;
+    uint32_t param2;
 } __packed;
 
 bool flask_combos_enabled(void);

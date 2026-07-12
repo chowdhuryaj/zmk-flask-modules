@@ -44,10 +44,16 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
+#include <zmk/behavior.h>
 #include <zmk/hid.h>
+#include <zmk/keymap.h>
 #include <zmk/matrix.h>
 
 #include <flask_combos/flask_combos.h>
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+#include <flask_macros/flask_macros.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -111,7 +117,7 @@ static void rebuild_lookup(void) {
         const struct flask_combo_slot *s = &cfg.slots[i];
         uint8_t len = slot_key_count(s);
 
-        if (s->usage == 0 || len < 2) {
+        if (s->action == FLASK_COMBO_OUT_NONE || len < 2) {
             continue;
         }
         slot_len[i] = len;
@@ -135,7 +141,67 @@ struct active_rt {
     uint8_t remaining[FLASK_COMBOS_KEYS];
     uint8_t remaining_count;
     bool output_down;
+    /* Fire data copied out of the slot at activation — the config table
+     * can be rewritten mid-hold and the release must mirror the press. */
+    uint8_t action;
+    uint16_t behavior_id;
+    uint32_t param1;
+    uint32_t param2;
+    uint32_t position; /* first combo position = the behavior's event position */
 };
+
+/* Press/release the typed output. BEHAVIOR outputs go through the same
+ * invoke path the keymap uses, with the first combo key's position — so
+ * hold-taps, layer-taps and layer keys behave like a real key at that
+ * position (AJ's bench-5 ask: combo outputs beyond plain keycodes). */
+static void fire_output(const struct active_rt *a, bool pressed, int64_t timestamp) {
+    switch (a->action) {
+    case FLASK_COMBO_OUT_USAGE:
+        if (a->param1 != 0) {
+            raise_zmk_keycode_state_changed_from_encoded(a->param1, pressed, timestamp);
+        }
+        break;
+    case FLASK_COMBO_OUT_MACRO:
+#if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
+        if (pressed) {
+            flask_macros_play((uint8_t)a->param1);
+        }
+#endif
+        break;
+    case FLASK_COMBO_OUT_BEHAVIOR: {
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+        /* Local-id lookup rides Studio's behavior registry — absent on the
+         * diagnostic (no-Studio) central image, where behavior outputs are
+         * stored but inert. */
+        const char *name = zmk_behavior_find_behavior_name_from_local_id(a->behavior_id);
+
+        if (name == NULL) {
+            LOG_WRN("flask_combos: behavior id %u not found", a->behavior_id);
+            return;
+        }
+        struct zmk_behavior_binding binding = {
+            .behavior_dev = name,
+            .param1 = a->param1,
+            .param2 = a->param2,
+        };
+        struct zmk_behavior_binding_event event = {
+            .layer = zmk_keymap_highest_layer_active(),
+            .position = a->position,
+            .timestamp = timestamp,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+            .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+        };
+        zmk_behavior_invoke_binding(&binding, event, pressed);
+#else
+        LOG_WRN("flask_combos: behavior outputs need CONFIG_ZMK_BEHAVIOR_LOCAL_IDS");
+#endif
+        break;
+    }
+    default:
+        break;
+    }
+}
 
 static struct active_rt actives[MAX_ACTIVE];
 
@@ -158,7 +224,10 @@ static int filter_candidates(uint32_t position) {
     uint64_t mask = 0;
 
     K_SPINLOCK(&cfg_lock) {
-        if (position < ZMK_KEYMAP_LEN) {
+        /* Gate on enabled here too — a capture opened while enabled must
+         * die the moment the master switch goes off (bench 5: "combos
+         * kept firing when off" — every window counts). */
+        if (cfg.enabled && position < ZMK_KEYMAP_LEN) {
             mask = lookup[position];
         }
     }
@@ -170,6 +239,9 @@ static int find_fully_pressed(void) {
     int found = -1;
 
     K_SPINLOCK(&cfg_lock) {
+        if (!cfg.enabled) {
+            K_SPINLOCK_BREAK;
+        }
         for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
             if ((candidates & BIT64(i)) && slot_len[i] == pressed_count) {
                 found = i;
@@ -206,8 +278,9 @@ static int release_pressed_keys(void) {
 
 static void activate_combo(int slot_idx) {
     struct active_rt *active = NULL;
-    uint32_t usage = 0;
+    struct active_rt fire = { .slot = 0xFF };
     uint8_t len = 0;
+    bool enabled = false;
 
     for (int i = 0; i < MAX_ACTIVE; i++) {
         if (actives[i].slot == 0xFF) {
@@ -217,13 +290,19 @@ static void activate_combo(int slot_idx) {
     }
 
     K_SPINLOCK(&cfg_lock) {
-        usage = cfg.slots[slot_idx].usage;
+        const struct flask_combo_slot *s = &cfg.slots[slot_idx];
+
+        enabled = cfg.enabled;
+        fire.action = s->action;
+        fire.behavior_id = s->behavior_id;
+        fire.param1 = s->param1;
+        fire.param2 = s->param2;
         len = slot_len[slot_idx];
     }
 
-    /* Config changed mid-capture or no active slot free: give the keys
-     * back to the pipeline instead of eating them. */
-    if (active == NULL || usage == 0 || len == 0) {
+    /* Config changed mid-capture, master switch flipped off, or no active
+     * slot free: give the keys back to the pipeline instead of eating them. */
+    if (active == NULL || !enabled || fire.action == FLASK_COMBO_OUT_NONE || len == 0) {
         LOG_WRN("flask_combos: cannot activate slot %d, releasing keys", slot_idx);
         release_pressed_keys();
         return;
@@ -232,9 +311,11 @@ static void activate_combo(int slot_idx) {
     uint8_t take = MIN(pressed_count, len);
     int64_t timestamp = pressed[0].data.timestamp;
 
+    *active = fire;
     active->slot = slot_idx;
     active->remaining_count = take;
     active->output_down = true;
+    active->position = pressed[0].data.position;
     for (int i = 0; i < take; i++) {
         active->remaining[i] = (uint8_t)pressed[i].data.position;
     }
@@ -246,8 +327,8 @@ static void activate_combo(int slot_idx) {
     }
     pressed_count -= take;
 
-    LOG_DBG("flask_combos: slot %d fires usage 0x%08x", slot_idx, usage);
-    raise_zmk_keycode_state_changed_from_encoded(usage, true, timestamp);
+    LOG_DBG("flask_combos: slot %d fires action %d", slot_idx, active->action);
+    fire_output(active, true, timestamp);
 }
 
 /* Resolve the current capture: activate the fully-pressed slot if there is
@@ -279,13 +360,10 @@ static bool release_combo_key(uint32_t position, int64_t timestamp) {
             }
             active->remaining[k] = active->remaining[--active->remaining_count];
             if (active->output_down) {
-                uint32_t usage = 0;
-
-                K_SPINLOCK(&cfg_lock) { usage = cfg.slots[active->slot].usage; }
+                /* Release mirrors the press from the activation-time copy —
+                 * the slot table may have been rewritten mid-hold. */
                 active->output_down = false;
-                if (usage != 0) {
-                    raise_zmk_keycode_state_changed_from_encoded(usage, false, timestamp);
-                }
+                fire_output(active, false, timestamp);
             }
             if (active->remaining_count == 0) {
                 active->slot = 0xFF;
@@ -459,6 +537,23 @@ int flask_combos_slot_set(uint8_t idx, const struct flask_combo_slot *in) {
             s.pos[k] = FLASK_COMBOS_POS_NONE;
         }
     }
+    if (s.action > FLASK_COMBO_OUT_MAX) {
+        s.action = FLASK_COMBO_OUT_NONE;
+    }
+    if (s.action == FLASK_COMBO_OUT_USAGE && s.param1 == 0) {
+        s.action = FLASK_COMBO_OUT_NONE;
+    }
+    if (s.action == FLASK_COMBO_OUT_NONE) {
+        s.behavior_id = 0;
+        s.param1 = 0;
+        s.param2 = 0;
+    }
+    if (s.action != FLASK_COMBO_OUT_BEHAVIOR) {
+        s.behavior_id = 0;
+        if (s.action != FLASK_COMBO_OUT_NONE) {
+            s.param2 = 0;
+        }
+    }
 
     K_SPINLOCK(&cfg_lock) {
         cfg.slots[idx] = s;
@@ -484,10 +579,19 @@ struct flask_combos_saved_cfg {
     uint16_t timeout_ms;
 } __packed;
 
-#define COMBOS_SETTINGS_VERSION 2
+/* v3 (2026-07-12, typed outputs): slot entries carry the whole typed
+ * struct. v2 slot entries (pos[] + u32 usage) migrate on restore — a
+ * usage becomes a USAGE-action output, so bench-saved combos survive the
+ * upgrade. */
+#define COMBOS_SETTINGS_VERSION 3
+
+struct flask_combo_slot_v2 {
+    uint8_t pos[FLASK_COMBOS_KEYS];
+    uint32_t usage;
+} __packed;
 
 static bool slot_is_empty(const struct flask_combo_slot *s) {
-    if (s->usage != 0) {
+    if (s->action != FLASK_COMBO_OUT_NONE) {
         return false;
     }
     for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
@@ -579,7 +683,8 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
             LOG_WRN("flask/combos/cfg unreadable (len %d)", (int)len);
             return 0;
         }
-        if (saved.version != COMBOS_SETTINGS_VERSION) {
+        /* v2 cfg is shape-identical — accept both versions. */
+        if (saved.version != COMBOS_SETTINGS_VERSION && saved.version != 2) {
             LOG_WRN("flask/combos/cfg version %d ignored", saved.version);
             return 0;
         }
@@ -596,22 +701,47 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
         int idx = atoi(&sub[1]);
         struct flask_combo_slot s;
 
-        if (idx < 0 || idx >= FLASK_COMBOS_SLOTS || len != sizeof(s)) {
-            LOG_WRN("flask/combos/%s ignored (len %d)", sub, (int)len);
+        if (idx < 0 || idx >= FLASK_COMBOS_SLOTS) {
+            LOG_WRN("flask/combos/%s ignored (bad index)", sub);
             return 0;
         }
-        if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
-            return -EIO;
+        if (len == sizeof(s)) {
+            if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
+                return -EIO;
+            }
+        } else if (len == sizeof(struct flask_combo_slot_v2)) {
+            /* v2 slot (pos + usage) — migrate to a USAGE-action output. */
+            struct flask_combo_slot_v2 old;
+
+            if (read_cb(cb_arg, &old, sizeof(old)) < 0) {
+                return -EIO;
+            }
+            s = (struct flask_combo_slot){
+                .action = old.usage ? FLASK_COMBO_OUT_USAGE : FLASK_COMBO_OUT_NONE,
+                .param1 = old.usage,
+            };
+            memcpy(s.pos, old.pos, FLASK_COMBOS_KEYS);
+        } else {
+            LOG_WRN("flask/combos/%s ignored (len %d)", sub, (int)len);
+            return 0;
         }
         for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
             if (s.pos[k] >= ZMK_KEYMAP_LEN) {
                 s.pos[k] = FLASK_COMBOS_POS_NONE;
             }
         }
+        if (s.action > FLASK_COMBO_OUT_MAX) {
+            s.action = FLASK_COMBO_OUT_NONE;
+        }
         K_SPINLOCK(&cfg_lock) {
             cfg.slots[idx] = s;
             slots_saved |= BIT64(idx);
-            slots_dirty &= ~BIT64(idx);
+            /* Migrated v2 slots re-save in the new shape on the next save. */
+            if (len != sizeof(s)) {
+                slots_dirty |= BIT64(idx);
+            } else {
+                slots_dirty &= ~BIT64(idx);
+            }
             rebuild_lookup();
         }
         return 0;

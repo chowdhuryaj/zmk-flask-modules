@@ -125,7 +125,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * v11 (2026-07-11): trackball role-swap channel 0x27 (flask_ballswap —
  * swapped base state 0x01 u16 RW [SET applies live, SAVE or the &bswap 0
  * key persists], effective state 0x02 RO u16 [base XOR momentary holds]). */
-#define FLASK_PROTO_VERSION 11
+/* v12 (2026-07-12): combos slot v2 (COMBOS_SLOT_V2 0x11 — typed outputs:
+ * usage-hold / macro / BEHAVIOR-by-local-id with two params; legacy 0x10
+ * keeps the usage-only view) + rgbmap runtime LED order (RGBMAP_LEDORDER
+ * 0x0A — chunked LED→position table; the wizard's measured map lives on
+ * the device now, so the reactive overlay is right without a reflash). */
+#define FLASK_PROTO_VERSION 12
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -161,6 +166,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define RGBMAP_EFFECT_SAT 0x07
 #define RGBMAP_EFFECT_VAL 0x08
 #define RGBMAP_SPLIT_LINK 0x09 /* RO — central found the peripheral's rgb GATT char */
+#define RGBMAP_LEDORDER 0x0A /* payload-addressed (v12): [start, count, pos...] */
 #define RGBMAP_LED 0x10    /* payload-addressed: [layer, led, h, s, v] */
 #define RGBMAP_FILL 0x12   /* payload-addressed: [layer, h, s, v] */
 
@@ -172,7 +178,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define COMBOS_SLOT_COUNT 0x02 /* RO */
 #define COMBOS_TIMEOUT 0x03    /* global candidate window, ms */
 #define COMBOS_KEYS 0x04       /* RO (v9) — positions per slot; sizes the slot frame */
-#define COMBOS_SLOT 0x10       /* payload-addressed: [slot, pos x KEYS, usage u32 BE] */
+#define COMBOS_SLOT 0x10       /* payload-addressed: [slot, pos x KEYS, usage u32 BE]
+                                * (legacy view — reads/writes USAGE-action slots) */
+#define COMBOS_SLOT_V2 0x11    /* payload-addressed (v12): [slot, pos x KEYS,
+                                * action, behavior_id u16 BE, p1 u32 BE, p2 u32 BE] */
 
 /* Macros values (channel 0x25) */
 #define MACROS_ENABLED 0x01
@@ -845,6 +854,29 @@ static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         }
         wr_u16(payload, flask_rgb_split_link_ready() ? 1 : 0);
         return true;
+    case RGBMAP_LEDORDER: {
+        /* Chunked LED→position table (v12): [start, count, pos...]. The
+         * start+count prefix echoes UNTOUCHED (the app's reply matcher
+         * requires it) — out-of-range chunks answer unhandled instead of
+         * clamping, so the app always requests exact windows. */
+        if (payload_len < 3) {
+            return false;
+        }
+        uint16_t start = payload[0];
+        uint8_t count = payload[1];
+
+        if (count == 0 || count > payload_len - 2) {
+            return false;
+        }
+        if (cmd == CMD_SET) {
+            if (flask_rgb_led_order_set(start, &payload[2], count) != count) {
+                return false;
+            }
+        } else if (flask_rgb_led_order_get(start, &payload[2], count) != count) {
+            return false;
+        }
+        return true;
+    }
     case RGBMAP_LED: {
         if (payload_len < 5) {
             return false;
@@ -900,8 +932,11 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         wr_u16(payload, FLASK_COMBOS_KEYS);
         return true;
     case COMBOS_SLOT: {
-        /* Frame is sized by COMBOS_KEYS (the app reads it first): usage
-         * sits right after the position block. */
+        /* Legacy usage-only view (pre-v12 apps). Frame is sized by
+         * COMBOS_KEYS: usage sits right after the position block. GET
+         * reports the usage for USAGE-action slots and 0 for anything a
+         * v12 app configured (a legacy app must not misread a behavior id
+         * as a usage); SET writes a USAGE-action slot. */
         const size_t u = 1 + FLASK_COMBOS_KEYS;
 
         if (payload_len < u + 4) {
@@ -911,9 +946,46 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         struct flask_combo_slot s;
 
         if (cmd == CMD_SET) {
+            memset(&s, 0, sizeof(s));
             memcpy(s.pos, &payload[1], FLASK_COMBOS_KEYS);
-            s.usage = ((uint32_t)payload[u] << 24) | ((uint32_t)payload[u + 1] << 16) |
-                      ((uint32_t)payload[u + 2] << 8) | payload[u + 3];
+            s.param1 = ((uint32_t)payload[u] << 24) | ((uint32_t)payload[u + 1] << 16) |
+                       ((uint32_t)payload[u + 2] << 8) | payload[u + 3];
+            s.action = s.param1 ? FLASK_COMBO_OUT_USAGE : FLASK_COMBO_OUT_NONE;
+            if (flask_combos_slot_set(slot, &s) != 0) {
+                return false;
+            }
+        }
+        if (flask_combos_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        uint32_t usage = s.action == FLASK_COMBO_OUT_USAGE ? s.param1 : 0;
+
+        memcpy(&payload[1], s.pos, FLASK_COMBOS_KEYS);
+        payload[u] = usage >> 24;
+        payload[u + 1] = usage >> 16;
+        payload[u + 2] = usage >> 8;
+        payload[u + 3] = usage;
+        return true;
+    }
+    case COMBOS_SLOT_V2: {
+        /* Typed view (v12): [slot, pos x KEYS, action, behavior_id u16 BE,
+         * param1 u32 BE, param2 u32 BE]. */
+        const size_t a = 1 + FLASK_COMBOS_KEYS;
+
+        if (payload_len < a + 11) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_combo_slot s;
+
+        if (cmd == CMD_SET) {
+            memcpy(s.pos, &payload[1], FLASK_COMBOS_KEYS);
+            s.action = payload[a];
+            s.behavior_id = ((uint16_t)payload[a + 1] << 8) | payload[a + 2];
+            s.param1 = ((uint32_t)payload[a + 3] << 24) | ((uint32_t)payload[a + 4] << 16) |
+                       ((uint32_t)payload[a + 5] << 8) | payload[a + 6];
+            s.param2 = ((uint32_t)payload[a + 7] << 24) | ((uint32_t)payload[a + 8] << 16) |
+                       ((uint32_t)payload[a + 9] << 8) | payload[a + 10];
             if (flask_combos_slot_set(slot, &s) != 0) {
                 return false;
             }
@@ -922,10 +994,17 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
             return false;
         }
         memcpy(&payload[1], s.pos, FLASK_COMBOS_KEYS);
-        payload[u] = s.usage >> 24;
-        payload[u + 1] = s.usage >> 16;
-        payload[u + 2] = s.usage >> 8;
-        payload[u + 3] = s.usage;
+        payload[a] = s.action;
+        payload[a + 1] = s.behavior_id >> 8;
+        payload[a + 2] = s.behavior_id;
+        payload[a + 3] = s.param1 >> 24;
+        payload[a + 4] = s.param1 >> 16;
+        payload[a + 5] = s.param1 >> 8;
+        payload[a + 6] = s.param1;
+        payload[a + 7] = s.param2 >> 24;
+        payload[a + 8] = s.param2 >> 16;
+        payload[a + 9] = s.param2 >> 8;
+        payload[a + 10] = s.param2;
         return true;
     }
     default:
@@ -1341,6 +1420,9 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     if (settings_name_steq(name, "rgbmap", NULL)) {
         return flask_rgb_settings_restore(len, read_cb, cb_arg);
+    }
+    if (settings_name_steq(name, "ledorder", NULL)) {
+        return flask_rgb_ledorder_restore(len, read_cb, cb_arg);
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
