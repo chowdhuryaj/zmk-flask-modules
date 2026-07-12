@@ -435,6 +435,14 @@ static void frgb_security_changed(struct bt_conn *conn, bt_security_t level,
 static void frgb_disconnected(struct bt_conn *conn, uint8_t reason) {
     ARG_UNUSED(reason);
 
+    /* The stack may drop a conn mid-discovery without invoking the
+     * discover callback — release the busy guard (identity compare only)
+     * or discovery stays blocked until reboot. */
+    if (conn == frgb_disc_conn) {
+        frgb_disc_conn = NULL;
+        k_work_schedule(&frgb_discover_work, K_SECONDS(5));
+    }
+
     if (conn != frgb_link.conn) {
         return;
     }
