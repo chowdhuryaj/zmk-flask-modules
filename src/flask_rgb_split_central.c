@@ -292,7 +292,13 @@ void flask_rgb_bulk_resync(void) {
 static uint8_t frgb_discover_func(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   struct bt_gatt_discover_params *params) {
     if (attr == NULL) {
-        /* Service absent — peripheral runs firmware without flask_rgb. */
+        /* No flask_rgb service/characteristic on THIS connection. That is
+         * expected when the visited central-role conn is not the split
+         * peripheral at all (zmk-ble-mouse-host makes a paired BLE mouse a
+         * central-role conn too) — retry lets the round-robin cursor in
+         * frgb_start_discovery move on to the next central conn, and also
+         * covers a peripheral that reflashes mid-session. */
+        k_work_schedule(&frgb_discover_work, K_SECONDS(5));
         return BT_GATT_ITER_STOP;
     }
 
@@ -324,28 +330,54 @@ static uint8_t frgb_discover_func(struct bt_conn *conn, const struct bt_gatt_att
     return BT_GATT_ITER_STOP;
 }
 
-/* bt_conn_foreach visitor: grab the first central-role LE conn (the split
- * link; the host link is peripheral-role). */
-static void frgb_find_central_conn(struct bt_conn *c, void *data) {
-    struct bt_conn **out = data;
+/* bt_conn_foreach visitor: collect every central-role LE conn. The split
+ * peripheral is central-role from our side, but so is a paired BLE mouse
+ * (zmk-ble-mouse-host) — role alone can't tell them apart, so discovery
+ * round-robins the candidates until the flask_rgb service turns up. */
+struct frgb_conn_scan {
+    struct bt_conn *conns[CONFIG_BT_MAX_CONN];
+    int count;
+};
+
+static void frgb_collect_central_conns(struct bt_conn *c, void *data) {
+    struct frgb_conn_scan *scan = data;
     struct bt_conn_info info;
 
-    if (*out == NULL && bt_conn_get_info(c, &info) == 0 &&
+    if (scan->count < ARRAY_SIZE(scan->conns) && bt_conn_get_info(c, &info) == 0 &&
         info.role == BT_CONN_ROLE_CENTRAL) {
-        *out = c;
+        scan->conns[scan->count++] = c;
     }
 }
+
+/* Round-robin cursor: IDENTITY ONLY, never dereferenced — conn objects live
+ * in a static pool, so a stale pointer compares safely (worst case the
+ * cursor skips one candidate for one round). */
+static struct bt_conn *frgb_last_tried;
 
 static void frgb_start_discovery(struct k_work *work) {
     ARG_UNUSED(work);
 
-    struct bt_conn *conn = NULL;
+    struct frgb_conn_scan scan = {0};
 
-    bt_conn_foreach(BT_CONN_TYPE_LE, frgb_find_central_conn, &conn);
+    bt_conn_foreach(BT_CONN_TYPE_LE, frgb_collect_central_conns, &scan);
 
-    if (conn == NULL || frgb_link.ready) {
+    if (scan.count == 0 || frgb_link.ready) {
         return;
     }
+
+    /* Start after the conn we tried last time (wraps). */
+    int start = 0;
+
+    for (int i = 0; i < scan.count; i++) {
+        if (scan.conns[i] == frgb_last_tried) {
+            start = (i + 1) % scan.count;
+            break;
+        }
+    }
+
+    struct bt_conn *conn = scan.conns[start];
+
+    frgb_last_tried = conn;
 
     memcpy(&frgb_disc_uuid, &frgb_svc_uuid, sizeof(frgb_disc_uuid));
     frgb_disc_params = (struct bt_gatt_discover_params){

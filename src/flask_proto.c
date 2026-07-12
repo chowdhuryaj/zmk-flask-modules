@@ -287,7 +287,13 @@ static uint16_t rd_u16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; 
 /* Latched once at init: hwinfo reset-cause bits describe the LAST reset —
  * read early and hold so late GETs (or a hwinfo clear elsewhere) can't
  * muddy the story. Zephyr bits: 0 pin, 1 software, 2 brownout, 3 POR,
- * 4 watchdog, 5 debug, 6 security, 7 low-power wake, 8 CPU lockup, ... */
+ * 4 watchdog, 5 debug, 6 security, 7 low-power wake, 8 CPU lockup, ...
+ *
+ * The register behind this (nRF RESETREAS) is STICKY: bits accumulate
+ * across resets until written-clear, and the register sits in an
+ * always-on domain — one historical watchdog fault would read as
+ * "crashed last session" on every boot forever. Clear after latching so
+ * each boot reports only the causes since the previous one. */
 static uint16_t boot_reset_cause;
 
 static int flask_reset_cause_init(void) {
@@ -295,6 +301,7 @@ static int flask_reset_cause_init(void) {
 
     if (hwinfo_get_reset_cause(&cause) == 0) {
         boot_reset_cause = (uint16_t)cause;
+        (void)hwinfo_clear_reset_cause();
     }
     return 0;
 }
