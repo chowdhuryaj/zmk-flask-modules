@@ -69,6 +69,7 @@ static const struct device *const frgb_strip = DEVICE_DT_GET(DT_PHANDLE(FRGB_NOD
 static struct k_spinlock frgb_lock;
 static uint8_t frgb_map[FRGB_LAYERS][FRGB_TOTAL][3];
 static bool frgb_enabled = true;
+static uint8_t frgb_brightness = 100; /* percent, scales every rendered pixel (v14) */
 static uint8_t frgb_layer;      /* rendered layer (central: mirrors keymap) */
 static bool frgb_awake = true;  /* activity gate */
 
@@ -149,6 +150,7 @@ __weak void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
     ARG_UNUSED(hsv);
 }
 __weak void flask_rgb_split_send_effect(void) {}
+__weak void flask_rgb_split_send_brightness(uint8_t percent) { ARG_UNUSED(percent); }
 __weak void flask_rgb_split_send_overlay(void) {}
 __weak void flask_rgb_bulk_resync(void) {}
 
@@ -210,6 +212,18 @@ static struct led_rgb frgb_effect_pixel(uint16_t global_led) {
     return v ? frgb_hsv_to_rgb(h, s, v) : (struct led_rgb){0};
 }
 
+/* Global brightness scale (v14) — applied to the FINAL pixel, so painted
+ * map, effect, and overlay all dim together. Caller holds frgb_lock. */
+static inline struct led_rgb frgb_scale_pixel(struct led_rgb c) {
+    if (frgb_brightness >= 100) {
+        return c;
+    }
+    c.r = ((uint16_t)c.r * frgb_brightness) / 100;
+    c.g = ((uint16_t)c.g * frgb_brightness) / 100;
+    c.b = ((uint16_t)c.b * frgb_brightness) / 100;
+    return c;
+}
+
 static void frgb_render(struct k_work *work) {
     ARG_UNUSED(work);
 
@@ -225,6 +239,7 @@ static void frgb_render(struct k_work *work) {
 
             if (dark) {
                 frgb_pixels[i] = (struct led_rgb){0};
+                continue;
             } else if (frgb_overlay_on && (frgb_overlay_mask[g / 8] >> (g % 8)) & 1) {
                 /* reactive overlay sits above map AND effect */
                 frgb_pixels[i] =
@@ -235,6 +250,7 @@ static void frgb_render(struct k_work *work) {
             } else {
                 frgb_pixels[i] = frgb_effect_pixel(g);
             }
+            frgb_pixels[i] = frgb_scale_pixel(frgb_pixels[i]);
         }
     }
 
@@ -352,6 +368,23 @@ void flask_rgb_set_enabled(bool on) {
     if (on) {
         frgb_power_kick_schedule();
     }
+}
+
+/* --- global brightness (channel 0x21 value 0x0B, v14) --- */
+
+uint8_t flask_rgb_brightness(void) { return frgb_brightness; }
+
+void flask_rgb_set_brightness(uint8_t percent) {
+    uint8_t pct = MIN(percent, 100);
+
+    K_SPINLOCK(&frgb_lock) { frgb_brightness = pct; }
+    flask_rgb_split_send_brightness(pct);
+    frgb_schedule_render();
+}
+
+void flask_rgb_sync_brightness(uint8_t percent) {
+    K_SPINLOCK(&frgb_lock) { frgb_brightness = MIN(percent, 100); }
+    frgb_schedule_render();
 }
 
 /* --- effect API (channel 0x21 values 0x04-0x08) --- */
@@ -539,12 +572,31 @@ struct flask_rgb_saved_hdr {
     uint8_t effect;
     uint8_t effect_speed;
     uint8_t effect_hsv[3];
+    /* v3 (proto v14): global brightness percent */
+    uint8_t brightness;
 } __packed;
 
-#define FLASK_RGB_SETTINGS_VERSION 2
+#define FLASK_RGB_SETTINGS_VERSION 3
 
 struct flask_rgb_saved {
     struct flask_rgb_saved_hdr hdr;
+    uint8_t map[FRGB_LAYERS][FRGB_TOTAL][3];
+} __packed;
+
+/* v2 shape (no brightness byte) — still restorable so AJ's painted layers
+ * survive the v14 flash; brightness seeds 100. */
+struct flask_rgb_saved_hdr_v2 {
+    uint8_t version;
+    uint8_t layers;
+    uint16_t total;
+    uint8_t enabled;
+    uint8_t effect;
+    uint8_t effect_speed;
+    uint8_t effect_hsv[3];
+} __packed;
+
+struct flask_rgb_saved_v2 {
+    struct flask_rgb_saved_hdr_v2 hdr;
     uint8_t map[FRGB_LAYERS][FRGB_TOTAL][3];
 } __packed;
 
@@ -558,6 +610,7 @@ int flask_rgb_save(void) {
         .enabled = frgb_enabled ? 1 : 0,
         .effect = frgb_effect,
         .effect_speed = frgb_effect_speed,
+        .brightness = frgb_brightness,
     };
     K_SPINLOCK(&frgb_lock) {
         memcpy(saved.hdr.effect_hsv, frgb_effect_col, 3);
@@ -604,28 +657,51 @@ int flask_rgb_ledorder_restore(size_t len, settings_read_cb read_cb, void *cb_ar
 
 /* Restore entry — called from flask_proto.c's "flask" settings handler.
  * v1 blobs (no effect fields) are a size mismatch and reseed dark — they
- * never reached benched hardware. */
+ * never reached benched hardware. v2 blobs (no brightness byte) restore
+ * with brightness 100 so painted layers survive the v14 flash. */
 int flask_rgb_settings_restore(size_t len, settings_read_cb read_cb, void *cb_arg) {
-    static struct flask_rgb_saved saved;
+    static union {
+        struct flask_rgb_saved v3;
+        struct flask_rgb_saved_v2 v2;
+    } saved; /* one 2.1 KB buffer for both shapes — keep off the stack */
 
-    if (len != sizeof(saved)) {
-        LOG_WRN("flask/rgbmap settings size mismatch (%d != %d)", (int)len, (int)sizeof(saved));
+    if (len == sizeof(saved.v3)) {
+        if (read_cb(cb_arg, &saved.v3, sizeof(saved.v3)) < 0) {
+            return -EIO;
+        }
+        if (saved.v3.hdr.version != FLASK_RGB_SETTINGS_VERSION ||
+            saved.v3.hdr.layers != FRGB_LAYERS || saved.v3.hdr.total != FRGB_TOTAL) {
+            LOG_WRN("flask/rgbmap settings shape mismatch ignored");
+            return 0;
+        }
+        K_SPINLOCK(&frgb_lock) {
+            memcpy(frgb_map, saved.v3.map, sizeof(frgb_map));
+            frgb_enabled = saved.v3.hdr.enabled != 0;
+            frgb_effect = MIN(saved.v3.hdr.effect, FLASK_RGB_EFFECT_MAX);
+            frgb_effect_speed = MAX(saved.v3.hdr.effect_speed, 1);
+            memcpy(frgb_effect_col, saved.v3.hdr.effect_hsv, 3);
+            frgb_brightness = MIN(saved.v3.hdr.brightness, 100);
+        }
+    } else if (len == sizeof(saved.v2)) {
+        if (read_cb(cb_arg, &saved.v2, sizeof(saved.v2)) < 0) {
+            return -EIO;
+        }
+        if (saved.v2.hdr.version != 2 || saved.v2.hdr.layers != FRGB_LAYERS ||
+            saved.v2.hdr.total != FRGB_TOTAL) {
+            LOG_WRN("flask/rgbmap settings shape mismatch ignored");
+            return 0;
+        }
+        K_SPINLOCK(&frgb_lock) {
+            memcpy(frgb_map, saved.v2.map, sizeof(frgb_map));
+            frgb_enabled = saved.v2.hdr.enabled != 0;
+            frgb_effect = MIN(saved.v2.hdr.effect, FLASK_RGB_EFFECT_MAX);
+            frgb_effect_speed = MAX(saved.v2.hdr.effect_speed, 1);
+            memcpy(frgb_effect_col, saved.v2.hdr.effect_hsv, 3);
+            frgb_brightness = 100;
+        }
+    } else {
+        LOG_WRN("flask/rgbmap settings size mismatch (%d)", (int)len);
         return -EINVAL;
-    }
-    if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
-        return -EIO;
-    }
-    if (saved.hdr.version != FLASK_RGB_SETTINGS_VERSION || saved.hdr.layers != FRGB_LAYERS ||
-        saved.hdr.total != FRGB_TOTAL) {
-        LOG_WRN("flask/rgbmap settings shape mismatch ignored");
-        return 0;
-    }
-    K_SPINLOCK(&frgb_lock) {
-        memcpy(frgb_map, saved.map, sizeof(frgb_map));
-        frgb_enabled = saved.hdr.enabled != 0;
-        frgb_effect = MIN(saved.hdr.effect, FLASK_RGB_EFFECT_MAX);
-        frgb_effect_speed = MAX(saved.hdr.effect_speed, 1);
-        memcpy(frgb_effect_col, saved.hdr.effect_hsv, 3);
     }
     frgb_schedule_render();
     frgb_anim_kick();

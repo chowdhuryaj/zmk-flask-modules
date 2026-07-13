@@ -1,0 +1,31 @@
+# Compiled default combos for flask_combos (runtime combos, Flask channel
+# 0x24). Same child shape as zmk,combos so a keymap's combos block migrates
+# by moving it under this node — each child seeds one runtime slot, in
+# declaration order, when settings hold nothing for that slot.
+#
+# Copyright (c) 2026 AJ
+# SPDX-License-Identifier: MIT
+
+description: "Default combo table for the flask_combos runtime engine"
+
+compatible: "flask,combos-defaults"
+
+child-binding:
+  description: "One default combo (zmk,combos child shape)"
+
+  properties:
+    bindings:
+      type: phandle-array
+      required: true
+    key-positions:
+      type: array
+      required: true
+    timeout-ms:
+      type: int
+      description: "Candidate window for this combo, ms (0 or absent = the global window)"
+    require-prior-idle-ms:
+      type: int
+      description: "Only fire when the last non-modifier tap is at least this old"
+    layers:
+      type: array
+      description: "Layer indexes this combo is active on (first entry used; absent = all layers)"

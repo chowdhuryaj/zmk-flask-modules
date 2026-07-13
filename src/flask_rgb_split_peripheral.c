@@ -77,6 +77,9 @@ static ssize_t frgb_chr_write(struct bt_conn *conn, const struct bt_gatt_attr *a
             flask_rgb_sync_overlay(p[1], &p[2], &p[5], len - 5);
         }
         break;
+    case FRGB_OP_BRIGHT:
+        flask_rgb_sync_brightness(p[1]);
+        break;
     default:
         break;
     }

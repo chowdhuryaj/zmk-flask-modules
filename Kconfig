@@ -125,14 +125,19 @@ config ZMK_FLASK_PROTO
 config ZMK_FLASK_COMBOS
     bool "Flask runtime combos"
     depends on SETTINGS
+    select ZMK_BEHAVIOR_LOCAL_IDS
     help
-      Runtime-editable combos (the Vial dynamic-combos analog): 32 slots of
-      up to 4 key positions firing an encoded keycode+modifiers output,
-      edited live over the Flask protocol (channel 0x24) and persisted via
-      settings. ZMK's devicetree combos are const config and ZMK Studio has
-      no combo RPC — this module is the live-editing path; it coexists with
-      devicetree combos. Central-only on splits (no DT node — enable
-      explicitly in the board .conf).
+      Runtime-editable combos (the Vial dynamic-combos analog): Kconfig-
+      sized slots of key positions firing a typed output (usage / macro /
+      behavior by local id), with per-combo timeout, prior-idle and layer
+      gates since v14, edited live over the Flask protocol (channel 0x24)
+      and persisted via settings. ZMK's devicetree combos are const config
+      and ZMK Studio has no combo RPC — this module is the live-editing
+      path; a keymap can compile default combos into it via a
+      `flask,combos-defaults` node (the imported DT combos). LOCAL_IDS is
+      selected so behavior-typed outputs and compiled defaults work on
+      every image, not just Studio builds. Central-only on splits (no DT
+      node — enable explicitly in the board .conf).
 
 config ZMK_FLASK_COMBOS_SLOTS
     int "Runtime combo slots"
@@ -185,6 +190,60 @@ config ZMK_FLASK_MACROS_STEPS
     help
       Typed steps (tap/press/release/wait) one macro can hold.
 
+config ZMK_FLASK_CSK
+    bool "Flask custom shift keys"
+    depends on SETTINGS
+    help
+      Runtime custom shift pairs (QMK custom_shift_keys analog, channel
+      0x16): while Shift is held, a key whose base usage matches a slot
+      sends the slot's shifted usage instead, with the physical Shift
+      masked out of the report. Pure keycode-event hook — no per-key
+      mod-morph nodes. Central-only on splits (no DT node — enable
+      explicitly in the board .conf).
+
+config ZMK_FLASK_CSK_SLOTS
+    int "Custom shift key slots"
+    depends on ZMK_FLASK_CSK
+    range 1 32
+    default 16
+    help
+      How many base/shifted pairs the table holds (QMK CSK_SLOTS is 16).
+
+config ZMK_FLASK_TAPDANCE
+    bool "Flask runtime tap dances"
+    depends on SETTINGS
+    select ZMK_BEHAVIOR_LOCAL_IDS
+    help
+      Runtime-editable tap dances (channel 0x28): the &ftd behavior runs a
+      slot's dance — core zmk,behavior-tap-dance semantics with the const
+      DT config swapped for a live-editable table (per-slot tapping term +
+      typed output per tap count). ZMK's native tap-dance compiles one
+      node per dance; this is the app-editable path. LOCAL_IDS selected so
+      behavior-typed outputs work on every image. Central-only on splits
+      (enable explicitly in the board .conf; the &ftd keymap node
+      auto-enables only the behavior below).
+
+config ZMK_FLASK_TAPDANCE_SLOTS
+    int "Runtime tap dance slots"
+    depends on ZMK_FLASK_TAPDANCE
+    range 1 64
+    default 16
+
+config ZMK_FLASK_TAPDANCE_TAPS
+    int "Outputs per tap dance (max tap count)"
+    depends on ZMK_FLASK_TAPDANCE
+    range 2 8
+    default 4
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE := zmk,behavior-flask-tapdance
+
+config ZMK_BEHAVIOR_FLASK_TAPDANCE
+    bool "Flask tap dance behavior (&ftd)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE))
+    depends on ZMK_FLASK_TAPDANCE
+    help
+      Keymap behavior running a flask_tapdance slot: &ftd <slot>.
+
 config ZMK_FLASK_LEADER
     bool "Flask runtime leader sequences"
     depends on SETTINGS
@@ -200,7 +259,7 @@ config ZMK_FLASK_LEADER_SLOTS
     int "Runtime leader sequence slots"
     depends on ZMK_FLASK_LEADER
     range 1 64
-    default 16
+    default 32
 
 config ZMK_FLASK_LEADER_KEYS
     int "Max keys per leader sequence"

@@ -1,10 +1,13 @@
 /*
  * flask_combos — runtime-editable combos (see include/flask_combos/flask_combos.h).
  *
- * The capture engine mirrors zmk app/src/combo.c (pinned rev 484a0547) with
- * the parts a runtime table doesn't need removed (per-combo timeouts, layer
- * masks, require-prior-idle, slow-release). The load-bearing semantics are
- * copied exactly:
+ * The capture engine mirrors zmk app/src/combo.c (pinned rev 484a0547).
+ * Since v14 it carries the per-combo knobs too — per-slot timeout,
+ * require-prior-idle (core's is_quick_tap against the last non-mod tap),
+ * and a single-layer gate — because the keymap's devicetree combos moved
+ * into runtime slots (compiled defaults via the `flask,combos-defaults`
+ * node, applied post-settings-load). Only slow-release remains unported.
+ * The load-bearing semantics are copied exactly:
  *
  *  - A key-down that could start/extend a combo is CAPTURED: the event is
  *    copied by value (copy_raised_zmk_position_state_changed) into a static
@@ -47,6 +50,7 @@
 #include <zmk/behavior.h>
 #include <zmk/hid.h>
 #include <zmk/keymap.h>
+#include <zmk/keys.h>
 #include <zmk/matrix.h>
 
 #include <flask_combos/flask_combos.h>
@@ -96,6 +100,17 @@ static uint64_t slots_saved;
 static uint64_t slots_dirty;
 static bool cfg_saved;
 static bool cfg_dirty;
+
+/* Slots seeded from the keymap's `flask,combos-defaults` node. A DELETED
+ * default must stay deleted across reboots, so save() writes an explicit
+ * empty entry (tombstone) for these instead of settings_delete — restore
+ * marks the slot saved and defaults_commit skips it. */
+static uint64_t slots_defaulted;
+
+/* Prior-idle tracking (core combo.c): the last non-modifier tap, ignored
+ * while a combo output is what produced it. */
+static int64_t last_tapped_ts = INT32_MIN;
+static int64_t last_combo_ts = INT32_MIN;
 
 static uint8_t slot_key_count(const struct flask_combo_slot *s) {
     uint8_t n = 0;
@@ -208,16 +223,67 @@ static struct active_rt actives[MAX_ACTIVE];
 static struct k_work_delayable timeout_task;
 static int64_t timeout_at;
 
-static int setup_candidates(uint32_t position, uint64_t *out) {
+/* Callers hold cfg_lock. Effective candidate window for a slot. */
+static uint16_t slot_eff_timeout(int i) {
+    uint16_t t = cfg.slots[i].timeout_ms;
+
+    return t ? t : cfg.timeout_ms;
+}
+
+/* First-key candidate gates (core combo.c setup_candidates_for_first_keypress):
+ * layer mask via the highest active layer INDEX, prior-idle via the last
+ * non-mod tap (is_quick_tap). Both checked only here — once a candidate
+ * set is open, later keys just filter it (core semantics). */
+static int setup_candidates(uint32_t position, int64_t timestamp, uint64_t *out) {
     uint64_t set = 0;
+    uint8_t highest = zmk_keymap_highest_layer_active();
 
     K_SPINLOCK(&cfg_lock) {
         if (cfg.enabled && position < ZMK_KEYMAP_LEN) {
-            set = lookup[position];
+            uint64_t hits = lookup[position];
+
+            while (hits) {
+                int i = __builtin_ctzll(hits);
+                const struct flask_combo_slot *s = &cfg.slots[i];
+
+                hits &= ~BIT64(i);
+                if (s->layer != FLASK_COMBOS_LAYER_ANY && s->layer != highest) {
+                    continue;
+                }
+                if (s->prior_idle_ms &&
+                    (last_tapped_ts + (int64_t)s->prior_idle_ms) > timestamp) {
+                    continue; /* mid-typing roll — core's is_quick_tap */
+                }
+                set |= BIT64(i);
+            }
         }
     }
     *out = set;
     return popcount64(set);
+}
+
+/* Drop candidates whose own window (first press + per-slot timeout) has
+ * closed by `now`. Returns the surviving count. */
+static int drop_expired_candidates(int64_t now) {
+    if (pressed_count == 0) {
+        return popcount64(candidates);
+    }
+
+    int64_t start = pressed[0].data.timestamp;
+
+    K_SPINLOCK(&cfg_lock) {
+        uint64_t left = candidates;
+
+        while (left) {
+            int i = __builtin_ctzll(left);
+
+            left &= ~BIT64(i);
+            if (start + (int64_t)slot_eff_timeout(i) <= now) {
+                candidates &= ~BIT64(i);
+            }
+        }
+    }
+    return popcount64(candidates);
 }
 
 static int filter_candidates(uint32_t position) {
@@ -328,6 +394,9 @@ static void activate_combo(int slot_idx) {
     pressed_count -= take;
 
     LOG_DBG("flask_combos: slot %d fires action %d", slot_idx, active->action);
+    /* The combo's own output must not count as a "tap" for prior-idle
+     * (core combo.c last_combo_timestamp). */
+    last_combo_ts = timestamp;
     fire_output(active, true, timestamp);
 }
 
@@ -381,9 +450,22 @@ static void update_timeout(void) {
         return;
     }
 
-    uint16_t window;
+    /* Earliest deadline across the live candidates (per-slot windows since
+     * v14). No candidates left = arm at the global window as before, so
+     * the capture always resolves. */
+    uint16_t window = 0;
 
-    K_SPINLOCK(&cfg_lock) { window = cfg.timeout_ms; }
+    K_SPINLOCK(&cfg_lock) {
+        uint64_t left = candidates;
+
+        window = cfg.timeout_ms;
+        while (left) {
+            int i = __builtin_ctzll(left);
+
+            left &= ~BIT64(i);
+            window = MIN(window, slot_eff_timeout(i));
+        }
+    }
 
     int64_t deadline = pressed[0].data.timestamp + window;
     int64_t delay = deadline - k_uptime_get();
@@ -397,10 +479,21 @@ static void update_timeout(void) {
 static void timeout_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
-    if (timeout_at == 0 || k_uptime_get() < timeout_at) {
+    int64_t now = k_uptime_get();
+
+    if (timeout_at == 0 || now < timeout_at) {
         return; /* cancelled or rescheduled */
     }
     timeout_at = 0;
+
+    /* Per-slot windows: the timer fires at the EARLIEST candidate deadline.
+     * A fully-pressed combo resolves now (core: timeout activates it);
+     * otherwise drop the expired candidates and, if any longer-window
+     * candidate survives, re-arm for its deadline instead of resolving. */
+    if (fully_pressed < 0 && drop_expired_candidates(now) > 0) {
+        update_timeout();
+        return;
+    }
     cleanup();
 }
 
@@ -416,22 +509,18 @@ static int position_down(struct zmk_position_state_changed *data) {
     int num_candidates;
 
     if (pressed_count == 0) {
-        num_candidates = setup_candidates(data->position, &candidates);
+        num_candidates = setup_candidates(data->position, data->timestamp, &candidates);
         if (num_candidates == 0) {
             return ZMK_EV_EVENT_BUBBLE;
         }
     } else {
-        if (data->timestamp - pressed[0].data.timestamp >=
-            (int64_t)flask_combos_timeout_ms()) {
-            /* Window closed before the work item fired: no candidate
-             * survives (global timeout — they all share the deadline).
-             * The whole group resolves below via cleanup(), and this key
-             * gets re-raised as a fresh first press — do NOT cleanup()
-             * here mid-down; its re-raise recursion would clobber the
-             * candidates we are about to compute (core combo.c's
-             * filter_timed_out_candidates semantics). */
-            candidates = 0;
-        }
+        /* Per-slot windows (v14): expire each candidate on ITS deadline
+         * before filtering on the new position. All expired → the whole
+         * group resolves below via cleanup(), and this key gets re-raised
+         * as a fresh first press — do NOT cleanup() here mid-down; its
+         * re-raise recursion would clobber the candidates we are about to
+         * compute (core combo.c's filter_timed_out_candidates semantics). */
+        drop_expired_candidates(data->timestamp);
         num_candidates = filter_candidates(data->position);
     }
 
@@ -475,14 +564,25 @@ static int position_up(struct zmk_position_state_changed *data) {
 static int flask_combos_listener(const zmk_event_t *eh) {
     struct zmk_position_state_changed *data = as_zmk_position_state_changed(eh);
 
-    if (data == NULL) {
-        return ZMK_EV_EVENT_BUBBLE;
+    if (data != NULL) {
+        return data->state ? position_down(data) : position_up(data);
     }
-    return data->state ? position_down(data) : position_up(data);
+
+    /* Prior-idle feed (core combo.c keycode_state_changed_listener): every
+     * non-modifier key DOWN stamps the last-tapped clock, except when a
+     * combo output raised it (last_combo_ts gate in store). */
+    struct zmk_keycode_state_changed *kc = as_zmk_keycode_state_changed(eh);
+
+    if (kc != NULL && kc->state && !is_mod(kc->usage_page, kc->keycode) &&
+        kc->timestamp > last_combo_ts) {
+        last_tapped_ts = kc->timestamp;
+    }
+    return ZMK_EV_EVENT_BUBBLE;
 }
 
 ZMK_LISTENER(flask_combos, flask_combos_listener);
 ZMK_SUBSCRIPTION(flask_combos, zmk_position_state_changed);
+ZMK_SUBSCRIPTION(flask_combos, zmk_keycode_state_changed);
 
 /* --- runtime API (proto channel 0x24) --- */
 
@@ -554,6 +654,14 @@ int flask_combos_slot_set(uint8_t idx, const struct flask_combo_slot *in) {
             s.param2 = 0;
         }
     }
+    if (s.timeout_ms) {
+        s.timeout_ms = CLAMP(s.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+    }
+    if (s.action == FLASK_COMBO_OUT_NONE) {
+        s.timeout_ms = 0;
+        s.prior_idle_ms = 0;
+        s.layer = FLASK_COMBOS_LAYER_ANY;
+    }
 
     K_SPINLOCK(&cfg_lock) {
         cfg.slots[idx] = s;
@@ -579,16 +687,16 @@ struct flask_combos_saved_cfg {
     uint16_t timeout_ms;
 } __packed;
 
-/* v3 (2026-07-12, typed outputs): slot entries carry the whole typed
- * struct. v2 slot entries (pos[] + u32 usage) migrate on restore — a
- * usage becomes a USAGE-action output, so bench-saved combos survive the
- * upgrade. */
-#define COMBOS_SETTINGS_VERSION 3
+/* v4 (2026-07-12, DT-defaults import round): slot entries grew per-combo
+ * timeout / prior-idle / layer. Pre-v14 slot shapes (v2 usage-only, v3
+ * typed) are DROPPED on restore, not migrated — AJ's ask was for the
+ * imported devicetree combos to REPLACE whatever runtime combos existed,
+ * and stale entries would otherwise shadow the imported defaults at the
+ * same indexes. cfg entries are shape-identical since v2 and stay. */
+#define COMBOS_SETTINGS_VERSION 4
 
-struct flask_combo_slot_v2 {
-    uint8_t pos[FLASK_COMBOS_KEYS];
-    uint32_t usage;
-} __packed;
+BUILD_ASSERT(sizeof(struct flask_combo_slot) == FLASK_COMBOS_KEYS + 16,
+             "slot settings entries are the raw struct — keep it packed");
 
 static bool slot_is_empty(const struct flask_combo_slot *s) {
     if (s->action != FLASK_COMBO_OUT_NONE) {
@@ -607,7 +715,7 @@ int flask_combos_save(void) {
     /* Static keeps the table copy off the save-queue stack; safe because
      * flask_proto's save queue runs at most one save at a time. */
     static struct flask_combo_slot slots[FLASK_COMBOS_SLOTS];
-    uint64_t pending, saved_bits;
+    uint64_t pending, saved_bits, default_bits;
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
@@ -616,6 +724,7 @@ int flask_combos_save(void) {
         memcpy(slots, cfg.slots, sizeof(slots));
         pending = slots_dirty;
         saved_bits = slots_saved;
+        default_bits = slots_defaulted;
         write_cfg = cfg_dirty || !cfg_saved;
         /* Claimed: re-marked on failure below; an edit landing mid-save
          * re-sets its bit and rides the next save. */
@@ -641,22 +750,27 @@ int flask_combos_save(void) {
         int i = __builtin_ctzll(pending);
         bool empty = slot_is_empty(&slots[i]);
         bool on_flash = (saved_bits & BIT64(i)) != 0;
+        /* A deleted DEFAULT persists as an explicit empty entry — plain
+         * settings_delete would resurrect the DT seed on the next boot. */
+        bool tombstone = empty && (default_bits & BIT64(i)) != 0;
         char key[24];
         int err = 0;
 
         snprintf(key, sizeof(key), "flask/combos/s%d", i);
-        if (empty && on_flash) {
+        if (tombstone) {
+            err = settings_save_one(key, &slots[i], sizeof(slots[i]));
+        } else if (empty && on_flash) {
             err = settings_delete(key);
         } else if (!empty) {
             err = settings_save_one(key, &slots[i], sizeof(slots[i]));
-        } /* empty + never saved: nothing stored, nothing to delete */
+        } /* empty + never saved + not defaulted: nothing stored, nothing to delete */
         if (err) {
             LOG_ERR("%s settings save failed: %d", key, err);
             K_SPINLOCK(&cfg_lock) { slots_dirty |= pending; }
             return err;
         }
         K_SPINLOCK(&cfg_lock) {
-            if (empty) {
+            if (empty && !tombstone) {
                 slots_saved &= ~BIT64(i);
             } else {
                 slots_saved |= BIT64(i);
@@ -705,25 +819,16 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
             LOG_WRN("flask/combos/%s ignored (bad index)", sub);
             return 0;
         }
-        if (len == sizeof(s)) {
-            if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
-                return -EIO;
-            }
-        } else if (len == sizeof(struct flask_combo_slot_v2)) {
-            /* v2 slot (pos + usage) — migrate to a USAGE-action output. */
-            struct flask_combo_slot_v2 old;
-
-            if (read_cb(cb_arg, &old, sizeof(old)) < 0) {
-                return -EIO;
-            }
-            s = (struct flask_combo_slot){
-                .action = old.usage ? FLASK_COMBO_OUT_USAGE : FLASK_COMBO_OUT_NONE,
-                .param1 = old.usage,
-            };
-            memcpy(s.pos, old.pos, FLASK_COMBOS_KEYS);
-        } else {
-            LOG_WRN("flask/combos/%s ignored (len %d)", sub, (int)len);
+        if (len != sizeof(s)) {
+            /* Pre-v14 slot shapes (v2 usage-only 12 B, v3 typed 19 B) are
+             * dropped, not migrated — the imported DT defaults replace
+             * whatever runtime combos existed (AJ 2026-07-12), and a
+             * migrated entry would shadow its default at the same index. */
+            LOG_WRN("flask/combos/%s dropped (pre-v14 len %d)", sub, (int)len);
             return 0;
+        }
+        if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
+            return -EIO;
         }
         for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
             if (s.pos[k] >= ZMK_KEYMAP_LEN) {
@@ -735,19 +840,112 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
         }
         K_SPINLOCK(&cfg_lock) {
             cfg.slots[idx] = s;
+            /* Restored = saved, INCLUDING explicit empties — that is the
+             * tombstone that keeps defaults_commit off a deleted default. */
             slots_saved |= BIT64(idx);
-            /* Migrated v2 slots re-save in the new shape on the next save. */
-            if (len != sizeof(s)) {
-                slots_dirty |= BIT64(idx);
-            } else {
-                slots_dirty &= ~BIT64(idx);
-            }
+            slots_dirty &= ~BIT64(idx);
             rebuild_lookup();
         }
         return 0;
     }
     return -ENOENT;
 }
+
+/* --- compiled defaults (the keymap's `flask,combos-defaults` node) ---
+ *
+ * The devicetree combos moved into runtime slots 2026-07-12 (AJ's ask:
+ * every combo editable in the Flask app). The keymap node keeps the exact
+ * child shape of zmk,combos, so combos migrate by moving the block; each
+ * child seeds one slot, in declaration order, as a BEHAVIOR-typed output
+ * (a &kp binding is just the key_press behavior with the usage as param1).
+ * Applied from flask_proto's settings h_commit — AFTER restore — so saved
+ * edits and tombstoned deletions of a default win over the seed. */
+
+#if DT_HAS_COMPAT_STATUS_OKAY(flask_combos_defaults)
+
+#define FCD_NODE DT_COMPAT_GET_ANY_STATUS_OKAY(flask_combos_defaults)
+
+struct flask_combo_default {
+    uint8_t pos[FLASK_COMBOS_KEYS];
+    uint16_t timeout_ms;
+    uint16_t prior_idle_ms;
+    uint8_t layer;
+    struct zmk_behavior_binding binding;
+};
+
+#define FCD_POS(i, n)                                                                              \
+    COND_CODE_1(DT_PROP_HAS_IDX(n, key_positions, i), (DT_PROP_BY_IDX(n, key_positions, i)),      \
+                (FLASK_COMBOS_POS_NONE))
+
+#define FCD_ENTRY(n)                                                                              \
+    {                                                                                              \
+        .pos = {LISTIFY(CONFIG_ZMK_FLASK_COMBOS_KEYS, FCD_POS, (, ), n)},                          \
+        .timeout_ms = DT_PROP_OR(n, timeout_ms, 0),                                                \
+        .prior_idle_ms = DT_PROP_OR(n, require_prior_idle_ms, 0),                                  \
+        .layer = COND_CODE_1(DT_NODE_HAS_PROP(n, layers), (DT_PROP_BY_IDX(n, layers, 0)),          \
+                             (FLASK_COMBOS_LAYER_ANY)),                                            \
+        .binding = ZMK_KEYMAP_EXTRACT_BINDING(0, n),                                               \
+    },
+
+static const struct flask_combo_default combo_defaults[] = {DT_FOREACH_CHILD(FCD_NODE, FCD_ENTRY)};
+
+BUILD_ASSERT(ARRAY_SIZE(combo_defaults) <= FLASK_COMBOS_SLOTS,
+             "more default combos than runtime slots");
+
+int flask_combos_defaults_commit(void) {
+    int applied = 0;
+    int unresolved = 0;
+
+    for (int i = 0; i < (int)ARRAY_SIZE(combo_defaults); i++) {
+        const struct flask_combo_default *d = &combo_defaults[i];
+        struct flask_combo_slot s = {
+            .action = FLASK_COMBO_OUT_BEHAVIOR,
+            .param1 = d->binding.param1,
+            .param2 = d->binding.param2,
+            .timeout_ms = d->timeout_ms,
+            .prior_idle_ms = d->prior_idle_ms,
+            .layer = d->layer,
+        };
+        zmk_behavior_local_id_t id = zmk_behavior_get_local_id(d->binding.behavior_dev);
+        bool fill = false;
+
+        memcpy(s.pos, d->pos, FLASK_COMBOS_KEYS);
+        if (id == 0 || id == UINT16_MAX) {
+            /* SETTINGS_TABLE local ids are assigned in zmk's own settings
+             * commit, which can run AFTER this handler on a fresh device —
+             * the caller retries until we resolve (0 = still pending). */
+            unresolved++;
+            continue;
+        }
+        s.behavior_id = id;
+
+        K_SPINLOCK(&cfg_lock) {
+            /* Defaulted marks the INDEX (not the content): a later edit or
+             * deletion of this slot must tombstone, never settings_delete,
+             * or the seed resurrects. */
+            slots_defaulted |= BIT64(i);
+            /* Restored entries — including explicit-empty tombstones —
+             * win over the seed. */
+            fill = !(slots_saved & BIT64(i)) && slot_is_empty(&cfg.slots[i]);
+            if (fill) {
+                cfg.slots[i] = s;
+                rebuild_lookup();
+            }
+        }
+        if (fill) {
+            applied++;
+        }
+    }
+    LOG_INF("flask_combos: %d/%d compiled defaults applied (%d pending ids)", applied,
+            (int)ARRAY_SIZE(combo_defaults), unresolved);
+    return unresolved;
+}
+
+#else /* no defaults node in the keymap */
+
+int flask_combos_defaults_commit(void) { return 0; }
+
+#endif
 
 static int flask_combos_init(void) {
     for (int i = 0; i < MAX_ACTIVE; i++) {
@@ -757,13 +955,16 @@ static int flask_combos_init(void) {
      * means "position 0, eight times", which the app faithfully rendered
      * as phantom entries on every draft (bench 2026-07-12; flask_leader
      * shipped with the same init from day one). The matcher never cared
-     * (usage==0 keeps a slot out of the lookup), the wire echo did. */
+     * (usage==0 keeps a slot out of the lookup), the wire echo did. Layer
+     * has the same sentinel rule: empty slots read LAYER_ANY, not 0. */
     for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
         memset(cfg.slots[i].pos, FLASK_COMBOS_POS_NONE, FLASK_COMBOS_KEYS);
+        cfg.slots[i].layer = FLASK_COMBOS_LAYER_ANY;
     }
     k_work_init_delayable(&timeout_task, timeout_handler);
     /* Lookup is already all-zero. Settings restore (via flask_proto's
-     * handler) fills the table in before the first key event matters. */
+     * handler) fills the table in before the first key event matters;
+     * defaults land after restore via flask_combos_defaults_commit(). */
     return 0;
 }
 

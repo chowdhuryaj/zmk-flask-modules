@@ -42,6 +42,13 @@ bool flask_rgb_enabled(void);
 bool flask_rgb_split_link_ready(void);
 void flask_rgb_set_enabled(bool on);
 
+/* Global brightness percent 0-100 (channel 0x21 value 0x0B, proto v14 —
+ * the native rgb_underglow BRI knob's analog). Scales EVERY rendered
+ * pixel — painted map, effect, and reactive overlay — on both halves
+ * (synced over the split link); persisted in the rgbmap blob. */
+uint8_t flask_rgb_brightness(void);
+void flask_rgb_set_brightness(uint8_t percent);
+
 /* Whole-strip effect engine (channel 0x21 values 0x04-0x08, proto v9).
  * Painted map keys (V > 0) OVERLAY the effect — same layering the QMK
  * NLKB16 tab describes. Effects: 0 off, 1 solid, 2 breathe, 3 spectrum,
@@ -89,6 +96,7 @@ void flask_rgb_sync_led(uint8_t layer, uint16_t led, const uint8_t hsv[3]);
 void flask_rgb_sync_enabled(bool on);
 void flask_rgb_sync_fill(uint8_t layer, const uint8_t hsv[3]);
 void flask_rgb_sync_effect(uint8_t effect, uint8_t speed, const uint8_t hsv[3], uint16_t phase);
+void flask_rgb_sync_brightness(uint8_t percent);
 
 /* Effect state snapshot for the central's egress (params + current phase,
  * so the peripheral's animation clock re-anchors on every sync). */
@@ -101,6 +109,7 @@ void flask_rgb_split_send_led(uint8_t layer, uint16_t led, const uint8_t hsv[3])
 void flask_rgb_split_send_enabled(bool on);
 void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]);
 void flask_rgb_split_send_effect(void);
+void flask_rgb_split_send_brightness(uint8_t percent);
 
 /* Full-map walk for the connect-time bulk sync. */
 void flask_rgb_bulk_resync(void);

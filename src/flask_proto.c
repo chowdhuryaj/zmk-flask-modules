@@ -84,6 +84,14 @@
 #include <flask_gestures/flask_gestures.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_CSK)
+#include <flask_csk/flask_csk.h>
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+#include <flask_tapdance/flask_tapdance.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -138,8 +146,22 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * wire shape — enabled 0x01, timeout ms 0x02 [0 = latch until a transparent
  * key, which is swallowed], threshold 0x03, layer index 0x04, plus the
  * ZMK-line extend-on-key 0x05; SAVE persists via "flask/automouse").
- * Replaces &zip_temp_layer on the Imprint's cursor chains. */
-#define FLASK_PROTO_VERSION 13
+ * Replaces &zip_temp_layer on the Imprint's cursor chains.
+ * v14 (2026-07-12, DT-import + shift/tap-dance round):
+ * (a) combos slot v3 (COMBOS_SLOT_V3 0x12 — the v2 frame + per-combo
+ * timeout u16 / prior-idle u16 / layer index [0xFF = all]); the keymap's
+ * devicetree combos moved into runtime slots as compiled defaults
+ * (flask,combos-defaults node), and pre-v14 saved slot shapes are DROPPED
+ * on restore so the imported defaults land; (b) custom shift keys channel
+ * 0x16 (flask_csk, QMK customShift channel — shared enabled 0x01 / slot
+ * count 0x02, ZMK slot frame 0x50 [slot, base u32 BE, shifted u32 BE];
+ * SAVE via "flask/csk"); (c) tap dance channel 0x28 (flask_tapdance —
+ * enabled 0x01, slots 0x02 / taps 0x03 RO, step 0x50 [slot, tap, action,
+ * behavior u16 BE, p1 u32 BE, p2 u32 BE], per-slot term 0x51 [slot, term
+ * u16 BE]; SAVE via "flask/tapdance"); (d) rgbmap global brightness 0x0B
+ * (percent 0-100, scales every rendered pixel on both halves, persisted
+ * in the rgbmap blob v3 — v2 blobs restore at 100). */
+#define FLASK_PROTO_VERSION 14
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -154,6 +176,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_ACCEL 0x10 /* QMK accel channel — same wire shape (v9) */
 #define CH_GESTURES 0x11 /* QMK gestures channel — shared knob ids, ZMK slot frame (v10) */
 #define CH_DRAGSCROLL 0x15
+#define CH_CSK 0x16 /* QMK customShift channel — shared enabled/count ids, ZMK slot frame (v14) */
 #define CH_LEADER 0x19 /* QMK leader channel — shared timeout id, ZMK slot frame (v10) */
 #define CH_AUTOSCROLL 0x1A
 #define CH_AUTOMOUSE 0x1B /* QMK autoMouse channel — same wire shape (v13) */
@@ -164,6 +187,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_MACROS 0x25
 #define CH_SCROLLSNAP 0x26 /* ZMK-line: flask_scrollsnap (v9) */
 #define CH_BALLSWAP 0x27 /* ZMK-line: flask_ballswap (v11); 0x1C-0x1F stay QMK-only */
+#define CH_TAPDANCE 0x28 /* ZMK-line: flask_tapdance (v14) */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -177,6 +201,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define RGBMAP_EFFECT_VAL 0x08
 #define RGBMAP_SPLIT_LINK 0x09 /* RO — central found the peripheral's rgb GATT char */
 #define RGBMAP_LEDORDER 0x0A /* payload-addressed (v12): [start, count, pos...] */
+#define RGBMAP_BRIGHTNESS 0x0B /* v14: global brightness percent 0-100 */
 #define RGBMAP_LED 0x10    /* payload-addressed: [layer, led, h, s, v] */
 #define RGBMAP_FILL 0x12   /* payload-addressed: [layer, h, s, v] */
 
@@ -192,6 +217,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
                                 * (legacy view — reads/writes USAGE-action slots) */
 #define COMBOS_SLOT_V2 0x11    /* payload-addressed (v12): [slot, pos x KEYS,
                                 * action, behavior_id u16 BE, p1 u32 BE, p2 u32 BE] */
+#define COMBOS_SLOT_V3 0x12    /* payload-addressed (v14): the v2 frame plus
+                                * [timeout u16 BE, prior_idle u16 BE, layer]
+                                * — per-combo timing/layer (DT-import round) */
 
 /* Macros values (channel 0x25) */
 #define MACROS_ENABLED 0x01
@@ -258,6 +286,22 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define SNAP_LOCK_MS 0x05
 #define SNAP_LOCK_EVENTS 0x06
 #define SNAP_IDLE_RESET 0x07
+
+/* Custom shift key values (channel 0x16; 0x01/0x02 = QMK cskEnabled/
+ * cskSlotCount, slot frame at 0x50 clear of QMK's u16 pair tables at
+ * 0x10+/0x30+ which cannot carry 32-bit ZMK usages) */
+#define CSK_ENABLED 0x01
+#define CSK_SLOT_COUNT 0x02 /* RO */
+#define CSK_SLOT 0x50 /* payload-addressed: [slot, base u32 BE, shifted u32 BE] */
+
+/* Tap dance values (channel 0x28, ZMK line — Vial serves QMK tap dance
+ * over its own protocol, so there is no QMK Flask channel to mirror) */
+#define TD_ENABLED 0x01
+#define TD_SLOT_COUNT 0x02 /* RO */
+#define TD_TAPS 0x03       /* RO — outputs per slot (max tap count) */
+#define TD_STEP 0x50 /* payload-addressed: [slot, tap, action, behavior u16 BE,
+                      * p1 u32 BE, p2 u32 BE] */
+#define TD_CFG 0x51  /* payload-addressed: [slot, term u16 BE (0 = default 200)] */
 
 /* Leader values (channel 0x19; 0x01 = QMK leaderTimeout, slot frame at
  * 0x50 clear of QMK's u16 table 0x10-0x4D) */
@@ -608,6 +652,149 @@ static bool handle_leader(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_
 }
 #endif /* CONFIG_ZMK_FLASK_LEADER */
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_CSK)
+/* Channel 0x16 — the slot value is a PAYLOAD-ADDRESSED byte frame:
+ * [slot, base u32 BE, shifted u32 BE]. Slot byte echoes untouched. */
+static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
+    switch (value_id) {
+    case CSK_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_csk_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_csk_enabled() ? 1 : 0);
+        return true;
+    case CSK_SLOT_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_csk_slot_count());
+        return true;
+    case CSK_SLOT: {
+        if (payload_len < 1 + 4 + 4) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_csk_slot s;
+
+        if (cmd == CMD_SET) {
+            s.base = ((uint32_t)payload[1] << 24) | ((uint32_t)payload[2] << 16) |
+                     ((uint32_t)payload[3] << 8) | payload[4];
+            s.shifted = ((uint32_t)payload[5] << 24) | ((uint32_t)payload[6] << 16) |
+                        ((uint32_t)payload[7] << 8) | payload[8];
+            if (flask_csk_slot_set(slot, &s) != 0) {
+                return false;
+            }
+        }
+        if (flask_csk_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        payload[1] = s.base >> 24;
+        payload[2] = s.base >> 16;
+        payload[3] = s.base >> 8;
+        payload[4] = s.base;
+        payload[5] = s.shifted >> 24;
+        payload[6] = s.shifted >> 16;
+        payload[7] = s.shifted >> 8;
+        payload[8] = s.shifted;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_CSK */
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+/* Channel 0x28 — step frame [slot, tap, action, behavior u16 BE, p1 u32
+ * BE, p2 u32 BE]; per-slot config frame [slot, term u16 BE]. Address
+ * bytes echo untouched. */
+static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
+    switch (value_id) {
+    case TD_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_tapdance_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_tapdance_enabled() ? 1 : 0);
+        return true;
+    case TD_SLOT_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_tapdance_slot_count());
+        return true;
+    case TD_TAPS:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_tapdance_tap_count());
+        return true;
+    case TD_STEP: {
+        if (payload_len < 2 + 1 + 2 + 4 + 4) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        uint8_t tap = payload[1];
+        struct flask_tapdance_slot s;
+
+        if (cmd == CMD_SET) {
+            struct flask_tapdance_output out = {
+                .action = payload[2],
+                .behavior_id = ((uint16_t)payload[3] << 8) | payload[4],
+                .param1 = ((uint32_t)payload[5] << 24) | ((uint32_t)payload[6] << 16) |
+                          ((uint32_t)payload[7] << 8) | payload[8],
+                .param2 = ((uint32_t)payload[9] << 24) | ((uint32_t)payload[10] << 16) |
+                          ((uint32_t)payload[11] << 8) | payload[12],
+            };
+
+            if (flask_tapdance_output_set(slot, tap, &out) != 0) {
+                return false;
+            }
+        }
+        if (flask_tapdance_slot_get(slot, &s) != 0 || tap >= FLASK_TAPDANCE_TAPS) {
+            return false;
+        }
+        const struct flask_tapdance_output *out = &s.taps[tap];
+
+        payload[2] = out->action;
+        payload[3] = out->behavior_id >> 8;
+        payload[4] = out->behavior_id;
+        payload[5] = out->param1 >> 24;
+        payload[6] = out->param1 >> 16;
+        payload[7] = out->param1 >> 8;
+        payload[8] = out->param1;
+        payload[9] = out->param2 >> 24;
+        payload[10] = out->param2 >> 16;
+        payload[11] = out->param2 >> 8;
+        payload[12] = out->param2;
+        return true;
+    }
+    case TD_CFG: {
+        if (payload_len < 1 + 2) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_tapdance_slot s;
+
+        if (cmd == CMD_SET) {
+            uint16_t term = ((uint16_t)payload[1] << 8) | payload[2];
+
+            if (flask_tapdance_term_set(slot, term) != 0) {
+                return false;
+            }
+        }
+        if (flask_tapdance_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        payload[1] = s.term_ms >> 8;
+        payload[2] = s.term_ms;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_TAPDANCE */
+
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
 /* Channel 0x11 — the slot value is a PAYLOAD-ADDRESSED byte frame:
  * [set, dir (0-7, E..NE clockwise), action, param u32 BE]. */
@@ -934,6 +1121,12 @@ static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         }
         wr_u16(payload, flask_rgb_split_link_ready() ? 1 : 0);
         return true;
+    case RGBMAP_BRIGHTNESS:
+        if (cmd == CMD_SET) {
+            flask_rgb_set_brightness((uint8_t)MIN(rd_u16(payload), 100));
+        }
+        wr_u16(payload, flask_rgb_brightness());
+        return true;
     case RGBMAP_LEDORDER: {
         /* Chunked LED→position table (v12): [start, count, pos...]. The
          * start+count prefix echoes UNTOUCHED (the app's reply matcher
@@ -1085,6 +1278,55 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         payload[a + 8] = s.param2 >> 16;
         payload[a + 9] = s.param2 >> 8;
         payload[a + 10] = s.param2;
+        return true;
+    }
+    case COMBOS_SLOT_V3: {
+        /* v14 view: the v2 frame + [timeout u16 BE, prior_idle u16 BE,
+         * layer index (0xFF = all)]. Slot byte echoes untouched. */
+        const size_t a = 1 + FLASK_COMBOS_KEYS;
+        const size_t t = a + 11;
+
+        if (payload_len < t + 5) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_combo_slot s;
+
+        if (cmd == CMD_SET) {
+            memcpy(s.pos, &payload[1], FLASK_COMBOS_KEYS);
+            s.action = payload[a];
+            s.behavior_id = ((uint16_t)payload[a + 1] << 8) | payload[a + 2];
+            s.param1 = ((uint32_t)payload[a + 3] << 24) | ((uint32_t)payload[a + 4] << 16) |
+                       ((uint32_t)payload[a + 5] << 8) | payload[a + 6];
+            s.param2 = ((uint32_t)payload[a + 7] << 24) | ((uint32_t)payload[a + 8] << 16) |
+                       ((uint32_t)payload[a + 9] << 8) | payload[a + 10];
+            s.timeout_ms = ((uint16_t)payload[t] << 8) | payload[t + 1];
+            s.prior_idle_ms = ((uint16_t)payload[t + 2] << 8) | payload[t + 3];
+            s.layer = payload[t + 4];
+            if (flask_combos_slot_set(slot, &s) != 0) {
+                return false;
+            }
+        }
+        if (flask_combos_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        memcpy(&payload[1], s.pos, FLASK_COMBOS_KEYS);
+        payload[a] = s.action;
+        payload[a + 1] = s.behavior_id >> 8;
+        payload[a + 2] = s.behavior_id;
+        payload[a + 3] = s.param1 >> 24;
+        payload[a + 4] = s.param1 >> 16;
+        payload[a + 5] = s.param1 >> 8;
+        payload[a + 6] = s.param1;
+        payload[a + 7] = s.param2 >> 24;
+        payload[a + 8] = s.param2 >> 16;
+        payload[a + 9] = s.param2 >> 8;
+        payload[a + 10] = s.param2;
+        payload[t] = s.timeout_ms >> 8;
+        payload[t + 1] = s.timeout_ms;
+        payload[t + 2] = s.prior_idle_ms >> 8;
+        payload[t + 3] = s.prior_idle_ms;
+        payload[t + 4] = s.layer;
         return true;
     }
     default:
@@ -1277,6 +1519,14 @@ static bool handle_save(uint8_t channel) {
     case CH_GESTURES:
         return flask_gestures_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_CSK)
+    case CH_CSK:
+        return flask_csk_save() == 0;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+    case CH_TAPDANCE:
+        return flask_tapdance_save() == 0;
+#endif
     default:
         return false;
     }
@@ -1390,6 +1640,16 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
         case CH_MACROS:
             ok = handle_macros(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_CSK)
+        case CH_CSK:
+            ok = handle_csk(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+        case CH_TAPDANCE:
+            ok = handle_tapdance(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
         default:
@@ -1577,10 +1837,62 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         }
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_CSK)
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "csk", &sub)) {
+            return flask_csk_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb, cb_arg);
+        }
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "tapdance", &sub)) {
+            return flask_tapdance_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                   cb_arg);
+        }
+    }
+#endif
     return -ENOENT;
 }
 
-SETTINGS_STATIC_HANDLER_DEFINE(flask, "flask", NULL, flask_settings_set, NULL, NULL);
+/* h_commit runs once after the whole settings tree loads — the hook for
+ * anything that must wait for "restore is complete" (combos DT defaults:
+ * a saved edit or tombstoned deletion of a default must win the slot).
+ *
+ * SETTINGS_TABLE behavior local ids are assigned in zmk's OWN handler
+ * commit, whose order relative to this one is link-dependent — on a fresh
+ * device the first pass can see unassigned ids. Retry on the flask_save
+ * queue until every default resolves (bounded; idempotent). */
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+static void combos_defaults_retry(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(combos_defaults_work, combos_defaults_retry);
+static int combos_defaults_tries;
+
+static void combos_defaults_retry(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (flask_combos_defaults_commit() > 0 && ++combos_defaults_tries < 5) {
+        k_work_reschedule_for_queue(&flask_save_q, &combos_defaults_work, K_MSEC(500));
+    }
+}
+#endif
+
+static int flask_settings_commit(void) {
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+    if (flask_combos_defaults_commit() > 0) {
+        combos_defaults_tries = 0;
+        k_work_reschedule_for_queue(&flask_save_q, &combos_defaults_work, K_MSEC(500));
+    }
+#endif
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(flask, "flask", NULL, flask_settings_set, flask_settings_commit,
+                               NULL);
 
 static int flask_proto_init(void) {
     static const struct k_work_queue_config qcfg = {.name = "flask_save"};

@@ -58,15 +58,28 @@ enum flask_combo_action {
 };
 #define FLASK_COMBO_OUT_MAX FLASK_COMBO_OUT_BEHAVIOR
 
+/* Layer gate sentinel: slot fires on any layer. Otherwise the slot's layer
+ * is a LAYER INDEX (same wire domain as automouse 0x1B), checked against
+ * zmk_keymap_highest_layer_active() when the first combo key goes down. */
+#define FLASK_COMBOS_LAYER_ANY 0xFF
+
 /* One runtime combo: up to FLASK_COMBOS_KEYS key positions (0xFF = unused)
  * plus a typed output. A slot is live when action != NONE and at least two
- * positions are set. */
+ * positions are set.
+ *
+ * v14 per-slot timing (the DT combos' knobs, imported): timeout_ms 0 =
+ * inherit the global window; prior_idle_ms 0 = no typing-roll guard,
+ * otherwise the slot only becomes a candidate when the last non-modifier
+ * tap is at least that old (core combo.c is_quick_tap semantics). */
 struct flask_combo_slot {
     uint8_t pos[FLASK_COMBOS_KEYS];
     uint8_t action;
     uint16_t behavior_id;
     uint32_t param1;
     uint32_t param2;
+    uint16_t timeout_ms;    /* 0 = global */
+    uint16_t prior_idle_ms; /* 0 = off */
+    uint8_t layer;          /* index; FLASK_COMBOS_LAYER_ANY = all */
 } __packed;
 
 bool flask_combos_enabled(void);
@@ -90,6 +103,18 @@ int flask_combos_save(void);
 /* Restore hook — called from flask_proto.c's "flask" settings handler for
  * every "combos..." entry; sub is the name past the subtree ("cfg",
  * "s<idx>", NULL for the retired v1 whole-table blob). Size/version
- * mismatches are ignored (table stays empty; defaults ARE empty). */
+ * mismatches are ignored — pre-v14 slot shapes are DROPPED by design
+ * (AJ's 2026-07-12 ask: the imported devicetree combos replace whatever
+ * runtime combos existed before them). */
 int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb read_cb,
                                   void *cb_arg);
+
+/* Post-settings-load hook (flask_proto's settings h_commit): fills every
+ * slot that (a) has a compiled default in the keymap's
+ * `flask,combos-defaults` node and (b) was neither restored nor
+ * tombstoned from settings. Runs after restore so a saved edit — or a
+ * saved DELETION — of a default combo wins over the DT seed. Returns how
+ * many defaults still lack a behavior local id (SETTINGS_TABLE ids are
+ * assigned in zmk's own settings commit, whose order vs ours is link-
+ * dependent) — the caller retries while nonzero. Idempotent. */
+int flask_combos_defaults_commit(void);

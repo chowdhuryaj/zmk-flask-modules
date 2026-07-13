@@ -17,6 +17,8 @@
  *                 (phase re-anchors the peripheral's animation clock)
  *   0x07 overlay: [op, on, h, s, v, mask bytes]  (5 + ceil(total/8) B)
  *                 (reactive overlay — transient highlight above map+effect)
+ *   0x08 bright:  [op, percent 0-100]                  (2 B)
+ *                 (global brightness — scales every rendered pixel, v14)
  *
  * SPDX-License-Identifier: MIT
  */
@@ -43,5 +45,6 @@
 #define FRGB_OP_CHUNK 0x05
 #define FRGB_OP_EFFECT 0x06
 #define FRGB_OP_OVERLAY 0x07
+#define FRGB_OP_BRIGHT 0x08
 
 #define FRGB_CHUNK_MAX 4

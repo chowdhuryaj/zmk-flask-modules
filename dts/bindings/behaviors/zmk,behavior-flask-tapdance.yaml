@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "Flask runtime tap-dance trigger behavior. Param selects the dance slot;
+  the slot's tapping term and per-tap-count outputs are live-editable over
+  the Flask protocol (channel 0x28)."
+
+compatible: "zmk,behavior-flask-tapdance"
+
+properties:
+  display-name:
+    type: string
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+
+binding-cells:
+  - param1

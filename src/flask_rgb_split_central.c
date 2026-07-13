@@ -68,6 +68,8 @@ static uint8_t frgb_fill_layer;
 static uint8_t frgb_fill_hsv[3];
 static bool frgb_send_effect_pending;
 static bool frgb_send_overlay_pending;
+static bool frgb_send_bright_pending;
+static uint8_t frgb_bright_val;
 static bool frgb_bulk_active;
 static uint8_t frgb_bulk_layer;
 static uint16_t frgb_bulk_led;
@@ -99,8 +101,9 @@ static void frgb_tx_drain(struct k_work *work) {
 
         /* latest-state flags first: enabled, then layer state */
         bool do_enabled = false, do_layers = false, do_fill = false, do_effect = false;
-        bool do_overlay = false;
+        bool do_overlay = false, do_bright = false;
         bool enabled_val = false;
+        uint8_t bright_val = 100;
         uint32_t layers_val = 0;
         uint8_t fill_layer = 0, fill_hsv[3];
 
@@ -109,6 +112,10 @@ static void frgb_tx_drain(struct k_work *work) {
                 do_enabled = true;
                 enabled_val = frgb_enabled_val;
                 frgb_send_enabled_pending = false;
+            } else if (frgb_send_bright_pending) {
+                do_bright = true;
+                bright_val = frgb_bright_val;
+                frgb_send_bright_pending = false;
             } else if (frgb_send_layers_pending) {
                 do_layers = true;
                 layers_val = frgb_layers_val;
@@ -135,6 +142,17 @@ static void frgb_tx_drain(struct k_work *work) {
                 K_SPINLOCK(&frgb_tx_lock) {
                     frgb_send_enabled_pending = true;
                     frgb_enabled_val = enabled_val;
+                }
+            }
+            sent = true;
+        } else if (do_bright) {
+            buf[0] = FRGB_OP_BRIGHT;
+            buf[1] = bright_val;
+            err = frgb_wwr(buf, 2);
+            if (err) {
+                K_SPINLOCK(&frgb_tx_lock) {
+                    frgb_send_bright_pending = true;
+                    frgb_bright_val = bright_val;
                 }
             }
             sent = true;
@@ -256,6 +274,14 @@ void flask_rgb_split_send_enabled(bool on) {
     k_work_schedule(&frgb_tx_work, K_NO_WAIT);
 }
 
+void flask_rgb_split_send_brightness(uint8_t percent) {
+    K_SPINLOCK(&frgb_tx_lock) {
+        frgb_send_bright_pending = true;
+        frgb_bright_val = percent;
+    }
+    k_work_schedule(&frgb_tx_work, K_NO_WAIT);
+}
+
 void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
     K_SPINLOCK(&frgb_tx_lock) {
         frgb_send_fill_pending = true;
@@ -292,6 +318,10 @@ void flask_rgb_bulk_resync(void) {
         frgb_bulk_active = true;
         frgb_bulk_layer = 0;
         frgb_bulk_led = 0;
+        /* Brightness rides the resync too — a peripheral that rebooted
+         * mid-session must not come back at full blast (v14). */
+        frgb_send_bright_pending = true;
+        frgb_bright_val = flask_rgb_brightness();
     }
     k_work_schedule(&frgb_tx_work, K_NO_WAIT);
 }
