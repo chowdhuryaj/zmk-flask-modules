@@ -1252,6 +1252,12 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         struct flask_combo_slot s;
 
         if (cmd == CMD_SET) {
+            /* The v12 frame carries no timing — read-modify so the slot's
+             * v14 timeout/prior-idle/layer survive instead of taking stack
+             * garbage (bench-5 bug A: the recurring phantom "38"). */
+            if (flask_combos_slot_get(slot, &s) != 0) {
+                return false;
+            }
             memcpy(s.pos, &payload[1], FLASK_COMBOS_KEYS);
             s.action = payload[a];
             s.behavior_id = ((uint16_t)payload[a + 1] << 8) | payload[a + 2];
