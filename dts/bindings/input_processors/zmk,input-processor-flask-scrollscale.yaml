@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+description: "Flask runtime scroll speed scaler — the stock ZMK scaler with a live speed percent applied to the compiled divisor (Flask protocol channel 0x29)"
+
+compatible: "zmk,input-processor-flask-scrollscale"
+
+include: ip_two_param.yaml
+
+properties:
+  type:
+    type: int
+    required: true
+  codes:
+    type: array
+    required: true

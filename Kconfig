@@ -50,6 +50,25 @@ config ZMK_INPUT_PROCESSOR_FLASK_ACCEL
       listener chain by a velocity-driven factor; takeoff/growth/offset/
       limit are runtime-tunable over the Flask protocol (channel 0x10).
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE := zmk,input-processor-flask-scrollscale
+
+config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE
+    bool "Flask runtime scroll speed scaler"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Drop-in replacement for the stock zip_x_scaler / zip_y_scaler on a
+      scroll ball's chain: identical math (in-place divide, remainder carry
+      via the listener's per-entry storage), with the compiled divisor
+      scaled by a live speed percent over the Flask protocol (channel 0x29,
+      SAVE persists via "flask/scrollscale"). ZMK's scaler divisors are
+      devicetree params — const config — so scroll speed otherwise needs a
+      reflash. Speed 100 = the keymap's compiled divisors verbatim, so the
+      default feel is unchanged by construction. Distinct from
+      ZMK_INPUT_PROCESSOR_FLASK_SCROLL, which is a rate-capped timer-based
+      converter with a different feel.
+
 DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP := zmk,input-processor-flask-scrollsnap
 
 config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP

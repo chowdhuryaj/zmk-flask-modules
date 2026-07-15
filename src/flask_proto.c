@@ -56,6 +56,10 @@
 #include <flask_scrollsnap/flask_scrollsnap.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
+#include <flask_scrollscale/flask_scrollscale.h>
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
 #include <flask_rgb/flask_rgb.h>
 #endif
@@ -160,8 +164,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * behavior u16 BE, p1 u32 BE, p2 u32 BE], per-slot term 0x51 [slot, term
  * u16 BE]; SAVE via "flask/tapdance"); (d) rgbmap global brightness 0x0B
  * (percent 0-100, scales every rendered pixel on both halves, persisted
- * in the rgbmap blob v3 — v2 blobs restore at 100). */
-#define FLASK_PROTO_VERSION 14
+ * in the rgbmap blob v3 — v2 blobs restore at 100).
+ * v15 (2026-07-15): runtime scroll speed channel 0x29 (flask_scrollscale —
+ * speed percent 0x01 u16, 25..400, 100 = the keymap's compiled divisors
+ * verbatim; SAVE via "flask/scrollscale"). ZMK's stock scaler divisors are
+ * const DT params, so the scroll ball's speed needed a reflash; the module
+ * is the stock scaler's math with the divisor scaled live. One knob scales
+ * both axes, so the Imprint's 16/12 horizontal:vertical ratio holds at every
+ * speed. */
+#define FLASK_PROTO_VERSION 15
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -188,6 +199,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_SCROLLSNAP 0x26 /* ZMK-line: flask_scrollsnap (v9) */
 #define CH_BALLSWAP 0x27 /* ZMK-line: flask_ballswap (v11); 0x1C-0x1F stay QMK-only */
 #define CH_TAPDANCE 0x28 /* ZMK-line: flask_tapdance (v14) */
+#define CH_SCROLLSCALE 0x29 /* ZMK-line: flask_scrollscale (v15) */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -279,6 +291,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define ACCEL_LIMIT 0x05
 
 /* Scroll snap values (channel 0x26, ZMK line — no QMK equivalent) */
+/* Channel 0x29 — flask_scrollscale. Percent of the keymap's compiled
+ * divisors, NOT an absolute rate: 100 = the benched default, 200 = twice as
+ * fast. One knob, both axes, so the base 16:12 ratio survives. */
+#define SCROLLSCALE_SPEED 0x01
+
 #define SNAP_ENABLED 0x01
 #define SNAP_THRESHOLD 0x02 /* axis dominance percent, 50..99 */
 #define SNAP_SAMPLES 0x03
@@ -355,6 +372,15 @@ struct flask_scrollsnap_saved {
 } __packed;
 
 #define SCROLLSNAP_SETTINGS_VERSION 1
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
+struct flask_scrollscale_saved {
+    uint8_t version;
+    struct flask_scrollscale_params params;
+} __packed;
+
+#define SCROLLSCALE_SETTINGS_VERSION 1
 #endif
 
 static void wr_u16(uint8_t *p, uint16_t v) {
@@ -586,6 +612,43 @@ static bool handle_scrollsnap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     }
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
+static bool handle_scrollscale(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_scrollscale_params p;
+
+    if (flask_scrollscale_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case SCROLLSCALE_SPEED:
+            p.speed_pct = v;
+            break;
+        default:
+            return false;
+        }
+        flask_scrollscale_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_scrollscale_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case SCROLLSCALE_SPEED:
+        wr_u16(payload, p.speed_pct);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE */
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
 /* Channel 0x19 — the slot value is a PAYLOAD-ADDRESSED byte frame:
@@ -1486,6 +1549,21 @@ static bool handle_save(uint8_t channel) {
         return true;
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
+    case CH_SCROLLSCALE: {
+        struct flask_scrollscale_saved saved = {.version = SCROLLSCALE_SETTINGS_VERSION};
+
+        if (flask_scrollscale_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/scrollscale", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/scrollscale settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     case CH_RGBMAP:
         return flask_rgb_save() == 0;
@@ -1616,6 +1694,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL)
         case CH_ACCEL:
             ok = handle_accel(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
+        case CH_SCROLLSCALE:
+            ok = handle_scrollscale(cmd, value_id, payload);
             break;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
@@ -1780,6 +1863,26 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         if (flask_scrollsnap_params_set(&saved.params) < 0) {
             LOG_WRN("flask/scrollsnap restore: processor not ready");
         }
+        return 0;
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
+    if (settings_name_steq(name, "scrollscale", NULL)) {
+        struct flask_scrollscale_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/scrollscale settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != SCROLLSCALE_SETTINGS_VERSION) {
+            LOG_WRN("flask/scrollscale settings version %d ignored", saved.version);
+            return 0;
+        }
+        flask_scrollscale_params_set(&saved.params);
         return 0;
     }
 #endif
