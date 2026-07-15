@@ -46,5 +46,10 @@
 #define FRGB_OP_EFFECT 0x06
 #define FRGB_OP_OVERLAY 0x07
 #define FRGB_OP_BRIGHT 0x08
+/* Idle blank timeout, seconds, LE16 at p[1..2] (v16). Both halves run their
+ * OWN activity clock, so the peripheral needs the value — not a blank
+ * command — or it would keep blanking at the compiled 30 s while the central
+ * stayed lit. */
+#define FRGB_OP_IDLE 0x09
 
 #define FRGB_CHUNK_MAX 4

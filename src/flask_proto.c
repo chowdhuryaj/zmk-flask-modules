@@ -171,8 +171,17 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * const DT params, so the scroll ball's speed needed a reflash; the module
  * is the stock scaler's math with the divisor scaled live. One knob scales
  * both axes, so the Imprint's 16/12 horizontal:vertical ratio holds at every
- * speed. */
-#define FLASK_PROTO_VERSION 15
+ * speed.
+ * v16 (2026-07-15): rgbmap idle blank timeout 0x0C (u16 SECONDS; 0 = never
+ * blank). flask_rgb renders dark whenever ZMK activity leaves ACTIVE, which
+ * is CONFIG_ZMK_IDLE_TIMEOUT (30 s) after the last KEY input — app writes
+ * still land while dark, so painting an idle keyboard read as "RGB updates
+ * lag, if at all". Synced to the peripheral (FRGB_OP_IDLE 0x09 — each half
+ * runs its own activity clock) and persisted in its own settings entry
+ * "flask/rgbidle", leaving the 2.1 KB map blob's shape alone. Values under
+ * the compiled idle timeout floor at it: that event is the earliest signal
+ * the module gets. */
+#define FLASK_PROTO_VERSION 16
 #define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
@@ -214,6 +223,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define RGBMAP_SPLIT_LINK 0x09 /* RO — central found the peripheral's rgb GATT char */
 #define RGBMAP_LEDORDER 0x0A /* payload-addressed (v12): [start, count, pos...] */
 #define RGBMAP_BRIGHTNESS 0x0B /* v14: global brightness percent 0-100 */
+#define RGBMAP_IDLE 0x0C /* v16: seconds of input idle before the strip blanks; 0 = never */
 #define RGBMAP_LED 0x10    /* payload-addressed: [layer, led, h, s, v] */
 #define RGBMAP_FILL 0x12   /* payload-addressed: [layer, h, s, v] */
 
@@ -1190,6 +1200,12 @@ static bool handle_rgbmap(uint8_t cmd, uint8_t value_id, uint8_t *payload,
         }
         wr_u16(payload, flask_rgb_brightness());
         return true;
+    case RGBMAP_IDLE:
+        if (cmd == CMD_SET) {
+            flask_rgb_set_idle_timeout(rd_u16(payload));
+        }
+        wr_u16(payload, flask_rgb_idle_timeout());
+        return true;
     case RGBMAP_LEDORDER: {
         /* Chunked LED→position table (v12): [start, count, pos...]. The
          * start+count prefix echoes UNTOUCHED (the app's reply matcher
@@ -1892,6 +1908,9 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
     }
     if (settings_name_steq(name, "ledorder", NULL)) {
         return flask_rgb_ledorder_restore(len, read_cb, cb_arg);
+    }
+    if (settings_name_steq(name, "rgbidle", NULL)) {
+        return flask_rgb_idle_restore(len, read_cb, cb_arg);
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)

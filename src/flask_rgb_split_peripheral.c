@@ -80,6 +80,11 @@ static ssize_t frgb_chr_write(struct bt_conn *conn, const struct bt_gatt_attr *a
     case FRGB_OP_BRIGHT:
         flask_rgb_sync_brightness(p[1]);
         break;
+    case FRGB_OP_IDLE:
+        if (len >= 3) {
+            flask_rgb_sync_idle_timeout(sys_get_le16(&p[1]));
+        }
+        break;
     default:
         break;
     }

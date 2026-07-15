@@ -70,6 +70,8 @@ static bool frgb_send_effect_pending;
 static bool frgb_send_overlay_pending;
 static bool frgb_send_bright_pending;
 static uint8_t frgb_bright_val;
+static bool frgb_send_idle_pending;
+static uint16_t frgb_idle_val;
 static bool frgb_bulk_active;
 static uint8_t frgb_bulk_layer;
 static uint16_t frgb_bulk_led;
@@ -101,9 +103,10 @@ static void frgb_tx_drain(struct k_work *work) {
 
         /* latest-state flags first: enabled, then layer state */
         bool do_enabled = false, do_layers = false, do_fill = false, do_effect = false;
-        bool do_overlay = false, do_bright = false;
+        bool do_overlay = false, do_bright = false, do_idle = false;
         bool enabled_val = false;
         uint8_t bright_val = 100;
+        uint16_t idle_val = 0;
         uint32_t layers_val = 0;
         uint8_t fill_layer = 0, fill_hsv[3];
 
@@ -116,6 +119,10 @@ static void frgb_tx_drain(struct k_work *work) {
                 do_bright = true;
                 bright_val = frgb_bright_val;
                 frgb_send_bright_pending = false;
+            } else if (frgb_send_idle_pending) {
+                do_idle = true;
+                idle_val = frgb_idle_val;
+                frgb_send_idle_pending = false;
             } else if (frgb_send_layers_pending) {
                 do_layers = true;
                 layers_val = frgb_layers_val;
@@ -153,6 +160,17 @@ static void frgb_tx_drain(struct k_work *work) {
                 K_SPINLOCK(&frgb_tx_lock) {
                     frgb_send_bright_pending = true;
                     frgb_bright_val = bright_val;
+                }
+            }
+            sent = true;
+        } else if (do_idle) {
+            buf[0] = FRGB_OP_IDLE;
+            sys_put_le16(idle_val, &buf[1]);
+            err = frgb_wwr(buf, 3);
+            if (err) {
+                K_SPINLOCK(&frgb_tx_lock) {
+                    frgb_send_idle_pending = true;
+                    frgb_idle_val = idle_val;
                 }
             }
             sent = true;
@@ -282,6 +300,14 @@ void flask_rgb_split_send_brightness(uint8_t percent) {
     k_work_schedule(&frgb_tx_work, K_NO_WAIT);
 }
 
+void flask_rgb_split_send_idle_timeout(uint16_t seconds) {
+    K_SPINLOCK(&frgb_tx_lock) {
+        frgb_send_idle_pending = true;
+        frgb_idle_val = seconds;
+    }
+    k_work_schedule(&frgb_tx_work, K_NO_WAIT);
+}
+
 void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
     K_SPINLOCK(&frgb_tx_lock) {
         frgb_send_fill_pending = true;
@@ -322,6 +348,11 @@ void flask_rgb_bulk_resync(void) {
          * mid-session must not come back at full blast (v14). */
         frgb_send_bright_pending = true;
         frgb_bright_val = flask_rgb_brightness();
+        /* Same for the idle timeout (v16): a rebooted peripheral defaults to
+         * the compiled 30 s and would blank on its own clock while the
+         * central stayed lit. */
+        frgb_send_idle_pending = true;
+        frgb_idle_val = flask_rgb_idle_timeout();
     }
     k_work_schedule(&frgb_tx_work, K_NO_WAIT);
 }

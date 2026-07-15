@@ -49,6 +49,28 @@ void flask_rgb_set_enabled(bool on);
 uint8_t flask_rgb_brightness(void);
 void flask_rgb_set_brightness(uint8_t percent);
 
+/* Idle blank timeout in SECONDS (channel 0x21 value 0x0C, proto v16).
+ *
+ * The strip renders dark once ZMK's activity state leaves ACTIVE, which by
+ * default is CONFIG_ZMK_IDLE_TIMEOUT = 30 s after the last KEY/ball input.
+ * App writes still land while dark — the map updates and simply is not
+ * rendered — which reads as "RGB updates lag, if at all" when the keyboard
+ * is idle (2026-07-15: AJ, painting from a workstation whose own mouse he
+ * was using).
+ *
+ * 0 = never blank (stays lit until deep sleep). Values below
+ * CONFIG_ZMK_IDLE_TIMEOUT/1000 cannot be honoured — that event is the
+ * earliest signal we get — so they behave as that floor.
+ *
+ * Synced to the peripheral (each half runs its own activity clock) and
+ * persisted in its OWN settings entry, "flask/rgbidle", so the 2.1 KB map
+ * blob keeps its shape and needs no migration (same reasoning as
+ * "flask/ledorder"). */
+#define FLASK_RGB_IDLE_NEVER 0
+uint16_t flask_rgb_idle_timeout(void);
+void flask_rgb_set_idle_timeout(uint16_t seconds);
+int flask_rgb_idle_restore(size_t len, settings_read_cb read_cb, void *cb_arg);
+
 /* Whole-strip effect engine (channel 0x21 values 0x04-0x08, proto v9).
  * Painted map keys (V > 0) OVERLAY the effect — same layering the QMK
  * NLKB16 tab describes. Effects: 0 off, 1 solid, 2 breathe, 3 spectrum,
@@ -97,6 +119,7 @@ void flask_rgb_sync_enabled(bool on);
 void flask_rgb_sync_fill(uint8_t layer, const uint8_t hsv[3]);
 void flask_rgb_sync_effect(uint8_t effect, uint8_t speed, const uint8_t hsv[3], uint16_t phase);
 void flask_rgb_sync_brightness(uint8_t percent);
+void flask_rgb_sync_idle_timeout(uint16_t seconds);
 
 /* Effect state snapshot for the central's egress (params + current phase,
  * so the peripheral's animation clock re-anchors on every sync). */
@@ -110,6 +133,7 @@ void flask_rgb_split_send_enabled(bool on);
 void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]);
 void flask_rgb_split_send_effect(void);
 void flask_rgb_split_send_brightness(uint8_t percent);
+void flask_rgb_split_send_idle_timeout(uint16_t seconds);
 
 /* Full-map walk for the connect-time bulk sync. */
 void flask_rgb_bulk_resync(void);

@@ -72,6 +72,10 @@ static bool frgb_enabled = true;
 static uint8_t frgb_brightness = 100; /* percent, scales every rendered pixel (v14) */
 static uint8_t frgb_layer;      /* rendered layer (central: mirrors keymap) */
 static bool frgb_awake = true;  /* activity gate */
+/* Seconds of input inactivity before the strip blanks; 0 = never. Default
+ * matches the compiled ZMK idle timeout, i.e. exactly the pre-v16 behaviour,
+ * so an unset device is unchanged. */
+static uint16_t frgb_idle_timeout_s = CONFIG_ZMK_IDLE_TIMEOUT / 1000;
 
 /* Whole-strip effect (v9): painted map keys overlay it. The phase clock
  * advances by `speed` per animation tick; both halves run the same clock
@@ -151,6 +155,7 @@ __weak void flask_rgb_split_send_fill(uint8_t layer, const uint8_t hsv[3]) {
 }
 __weak void flask_rgb_split_send_effect(void) {}
 __weak void flask_rgb_split_send_brightness(uint8_t percent) { ARG_UNUSED(percent); }
+__weak void flask_rgb_split_send_idle_timeout(uint16_t seconds) { ARG_UNUSED(seconds); }
 __weak void flask_rgb_split_send_overlay(void) {}
 __weak void flask_rgb_bulk_resync(void) {}
 
@@ -632,8 +637,34 @@ int flask_rgb_save(void) {
     err = settings_save_one("flask/ledorder", order, sizeof(order));
     if (err) {
         LOG_ERR("flask/ledorder settings save failed: %d", err);
+        return err;
+    }
+
+    /* Own entry, same reasoning as ledorder: the 2.1 KB map blob keeps its
+     * shape, so no v4 migration and old saves stay readable. */
+    uint16_t idle = flask_rgb_idle_timeout();
+
+    err = settings_save_one("flask/rgbidle", &idle, sizeof(idle));
+    if (err) {
+        LOG_ERR("flask/rgbidle settings save failed: %d", err);
     }
     return err;
+}
+
+/* Restore the idle blank timeout ("flask/rgbidle", v16). Size mismatch =
+ * a shape we do not know — keep the compiled default. */
+int flask_rgb_idle_restore(size_t len, settings_read_cb read_cb, void *cb_arg) {
+    uint16_t idle;
+
+    if (len != sizeof(idle)) {
+        LOG_WRN("flask/rgbidle settings size mismatch (%d != %d)", (int)len, (int)sizeof(idle));
+        return 0;
+    }
+    if (read_cb(cb_arg, &idle, sizeof(idle)) < 0) {
+        return -EIO;
+    }
+    flask_rgb_set_idle_timeout(idle);
+    return 0;
 }
 
 /* Restore the runtime LED order ("flask/ledorder", v12). Size mismatch =
@@ -726,13 +757,77 @@ ZMK_LISTENER(flask_rgb_layer, frgb_layer_listener);
 ZMK_SUBSCRIPTION(flask_rgb_layer, zmk_layer_state_changed);
 #endif
 
+static void frgb_blank(struct k_work *work) {
+    K_SPINLOCK(&frgb_lock) { frgb_awake = false; }
+    frgb_schedule_render();
+    frgb_anim_kick();
+}
+static K_WORK_DELAYABLE_DEFINE(frgb_blank_work, frgb_blank);
+
+uint16_t flask_rgb_idle_timeout(void) {
+    uint16_t v;
+
+    K_SPINLOCK(&frgb_lock) { v = frgb_idle_timeout_s; }
+    return v;
+}
+
+/* Local apply — no split egress (same split as brightness: the setter
+ * forwards, the sync path must not echo back). */
+static void frgb_apply_idle_timeout(uint16_t seconds) {
+    K_SPINLOCK(&frgb_lock) { frgb_idle_timeout_s = seconds; }
+
+    /* Applying a longer timeout (or "never") while already blanked should
+     * light the strip back up now, not on the next keypress — otherwise the
+     * knob looks broken exactly when it is being set. The pending blank is
+     * dropped either way; the next idle event re-arms it. */
+    k_work_cancel_delayable(&frgb_blank_work);
+    if (zmk_activity_get_state() == ZMK_ACTIVITY_ACTIVE || seconds == FLASK_RGB_IDLE_NEVER) {
+        K_SPINLOCK(&frgb_lock) { frgb_awake = true; }
+    }
+    frgb_schedule_render();
+    frgb_anim_kick();
+}
+
+void flask_rgb_set_idle_timeout(uint16_t seconds) {
+    frgb_apply_idle_timeout(seconds);
+    flask_rgb_split_send_idle_timeout(seconds);
+}
+
+void flask_rgb_sync_idle_timeout(uint16_t seconds) { frgb_apply_idle_timeout(seconds); }
+
 static int frgb_activity_listener(const zmk_event_t *eh) {
     const struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
 
     if (ev == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    K_SPINLOCK(&frgb_lock) { frgb_awake = (ev->state == ZMK_ACTIVITY_ACTIVE); }
+
+    if (ev->state == ZMK_ACTIVITY_ACTIVE) {
+        k_work_cancel_delayable(&frgb_blank_work);
+        K_SPINLOCK(&frgb_lock) { frgb_awake = true; }
+    } else if (ev->state == ZMK_ACTIVITY_SLEEP) {
+        /* Deep sleep powers the board down — never hold the strip lit. */
+        k_work_cancel_delayable(&frgb_blank_work);
+        K_SPINLOCK(&frgb_lock) { frgb_awake = false; }
+    } else {
+        uint16_t t;
+
+        K_SPINLOCK(&frgb_lock) { t = frgb_idle_timeout_s; }
+        if (t == FLASK_RGB_IDLE_NEVER) {
+            return ZMK_EV_EVENT_BUBBLE; /* stay lit, nothing to render */
+        }
+        /* This event IS the idle signal, and it arrives CONFIG_ZMK_IDLE_TIMEOUT
+         * after the last input — so the remaining wait is the difference, and a
+         * timeout below that floor blanks immediately. reschedule (not
+         * schedule): a second idle event must move the deadline, not keep the
+         * old one. */
+        uint32_t want_ms = (uint32_t)t * 1000U;
+        uint32_t after_ms = want_ms > CONFIG_ZMK_IDLE_TIMEOUT ? want_ms - CONFIG_ZMK_IDLE_TIMEOUT : 0;
+
+        k_work_reschedule(&frgb_blank_work, K_MSEC(after_ms));
+        return ZMK_EV_EVENT_BUBBLE; /* still lit until the work fires */
+    }
+
     frgb_schedule_render();
     frgb_anim_kick();
     return ZMK_EV_EVENT_BUBBLE;
