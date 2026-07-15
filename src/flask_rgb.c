@@ -774,6 +774,13 @@ uint16_t flask_rgb_idle_timeout(void) {
 /* Local apply — no split egress (same split as brightness: the setter
  * forwards, the sync path must not echo back). */
 static void frgb_apply_idle_timeout(uint16_t seconds) {
+    /* Floor nonzero values at the compiled idle timeout and store the FLOORED
+     * value: the activity-idle event is the earliest signal we get, so a
+     * smaller number cannot be honoured, and echoing it back unchanged would
+     * report a setting the device does not have. 0 (never) passes through. */
+    if (seconds != FLASK_RGB_IDLE_NEVER) {
+        seconds = MAX(seconds, (uint16_t)(CONFIG_ZMK_IDLE_TIMEOUT / 1000));
+    }
     K_SPINLOCK(&frgb_lock) { frgb_idle_timeout_s = seconds; }
 
     /* Applying a longer timeout (or "never") while already blanked should
