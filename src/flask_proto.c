@@ -182,7 +182,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * the compiled idle timeout floor at it: that event is the earliest signal
  * the module gets. */
 #define FLASK_PROTO_VERSION 16
-#define FLASK_FAMILY_IMPRINT 4 /* 1=adept 2=svalboard 3=nlkb16 4=imprint */
+/* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
+ * 2=svalboard 3=nlkb16 4=imprint 5=totem). */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
 #define CMD_SET 0x07
@@ -438,7 +439,7 @@ static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
         wr_u16(payload, zmk_keymap_highest_layer_active());
         return true;
     case META_FAMILY:
-        wr_u16(payload, FLASK_FAMILY_IMPRINT);
+        wr_u16(payload, CONFIG_ZMK_FLASK_FAMILY);
         return true;
 #if IS_ENABLED(CONFIG_HWINFO)
     case META_RESET_CAUSE:
