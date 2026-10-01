@@ -183,7 +183,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * the module gets. */
 #define FLASK_PROTO_VERSION 16
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
- * 2=svalboard 3=nlkb16 4=imprint 5=totem). */
+ * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
 /* Commands (VIA custom-value ids, reused raw like the QMK side) */
 #define CMD_SET 0x07

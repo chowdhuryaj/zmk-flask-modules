@@ -148,7 +148,7 @@ config ZMK_FLASK_FAMILY
     help
       Answered on meta value 0x03. Every ZMK board shares VID/PID
       1d50:615e, so this id is how the Flask apps tell devices apart.
-      1=adept 2=svalboard 3=nlkb16 4=imprint 5=totem.
+      1=adept 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem.
 
 config ZMK_FLASK_COMBOS
     bool "Flask runtime combos"
