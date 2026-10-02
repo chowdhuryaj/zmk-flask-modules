@@ -1,0 +1,23 @@
+# Compiled default rules for flask_adaptive (runtime adaptive keys, Flask
+# channel 0x2B). `sets` lists urob zmk,behavior-adaptive-key nodes; set i is
+# sets[i]. Its bindings[0] seeds the set's fallback, and each of its children
+# expands to one rule per trigger-keys entry (set order, child order,
+# trigger order) in the shared rule pool. `&kp X` bindings become usage
+# steps, every other binding a behavior step. Saved app edits and deletions
+# win over these on boot.
+#
+# Not supported (build fails): min-prior-idle-ms, dead-keys, delete-prior,
+# more than 8 trigger-keys in a child, more bindings than
+# ZMK_FLASK_ADAPTIVE_STEPS, more rules than ZMK_FLASK_ADAPTIVE_RULES.
+#
+# SPDX-License-Identifier: MIT
+
+description: "Default rule table for the flask_adaptive runtime engine"
+
+compatible: "flask,adaptive-defaults"
+
+properties:
+  sets:
+    type: phandles
+    required: true
+    description: "zmk,behavior-adaptive-key nodes, one per adaptive set"

@@ -100,6 +100,10 @@
 #include <flask_holdtap/flask_holdtap.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+#include <flask_adaptive/flask_adaptive.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -193,8 +197,19 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * 1 virtual, key position or 0xFF, name[26]]; SAVE via "flask/holdtap").
  * One slot per KEY POSITION plus VIRTUAL slots after them (nodes with
  * `slot = <n>`: combo / macro hold-taps), read at key-down. Core hold-tap timing is const DT, so a per-key timing
- * slider needed its own engine. */
-#define FLASK_PROTO_VERSION 17
+ * slider needed its own engine.
+ * v18 (2026-10-02): runtime adaptive keys channel 0x2B (flask_adaptive —
+ * enabled 0x01, set count 0x02 / rule pool size 0x03 / steps per rule 0x04
+ * RO, rule header 0x50 payload-addressed [rule, set, trigger u32 BE (0 =
+ * delete the rule), max idle ms u16 BE, flags (bit0 = exact mods)], rule
+ * step 0x51 [rule, step, action, behavior u16 BE, p1 u32 BE, p2 u32 BE]
+ * (the tap-dance step frame), set fallback 0x52 [set, action, behavior u16
+ * BE, p1 u32 BE, p2 u32 BE]; SAVE via "flask/adaptive"). `&fak <set>`
+ * fires the output chosen by the last key typed (urob/zmk-adaptive-key
+ * semantics, modifier keys never count as the last key); the rule pool is
+ * shared by all sets and compiled defaults come from a
+ * `flask,adaptive-defaults` node over the keymap's existing ak nodes. */
+#define FLASK_PROTO_VERSION 18
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -224,6 +239,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_TAPDANCE 0x28 /* ZMK-line: flask_tapdance (v14) */
 #define CH_SCROLLSCALE 0x29 /* ZMK-line: flask_scrollscale (v15) */
 #define CH_HOLDTAP 0x2A /* ZMK-line: flask_holdtap (v17) */
+#define CH_ADAPTIVE 0x2B /* ZMK-line: flask_adaptive (v18) */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -344,6 +360,18 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_STEP 0x50 /* payload-addressed: [slot, tap, action, behavior u16 BE,
                       * p1 u32 BE, p2 u32 BE] */
 #define TD_CFG 0x51  /* payload-addressed: [slot, term u16 BE (0 = default 200)] */
+
+/* Adaptive key values (channel 0x2B, ZMK line) */
+#define AK_ENABLED 0x01
+#define AK_SET_COUNT 0x02  /* RO */
+#define AK_RULE_COUNT 0x03 /* RO — rule pool size */
+#define AK_STEP_COUNT 0x04 /* RO — steps per rule */
+#define AK_RULE 0x50       /* payload-addressed: [rule, set, trigger u32 BE (0 = delete),
+                            * max idle u16 BE, flags (bit0 exact mods)] */
+#define AK_STEP 0x51       /* payload-addressed: [rule, step, action, behavior u16 BE,
+                            * p1 u32 BE, p2 u32 BE] */
+#define AK_FALLBACK 0x52   /* payload-addressed: [set, action, behavior u16 BE,
+                            * p1 u32 BE, p2 u32 BE] */
 
 /* Hold-tap timing values (channel 0x2A, ZMK line). Slot = key position. */
 #define HT_SLOT_COUNT 0x01 /* RO */
@@ -889,6 +917,131 @@ static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, siz
     }
 }
 #endif /* CONFIG_ZMK_FLASK_TAPDANCE */
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+static uint32_t rd_u32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void wr_u32(uint8_t *p, uint32_t v) {
+    p[0] = v >> 24;
+    p[1] = v >> 16;
+    p[2] = v >> 8;
+    p[3] = v;
+}
+
+/* Typed step at p: [action, behavior u16 BE, p1 u32 BE, p2 u32 BE] (9 B). */
+static void ak_step_rd(const uint8_t *p, struct flask_adaptive_step *s) {
+    s->action = p[0];
+    s->behavior_id = ((uint16_t)p[1] << 8) | p[2];
+    s->param1 = rd_u32(&p[3]);
+    s->param2 = rd_u32(&p[7]);
+}
+
+static void ak_step_wr(uint8_t *p, const struct flask_adaptive_step *s) {
+    p[0] = s->action;
+    p[1] = s->behavior_id >> 8;
+    p[2] = s->behavior_id;
+    wr_u32(&p[3], s->param1);
+    wr_u32(&p[7], s->param2);
+}
+
+/* Channel 0x2B. Address bytes echo untouched; everything after them is the
+ * APPLIED value. A rejected frame returns false BEFORE touching payload. */
+static bool handle_adaptive(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
+    switch (value_id) {
+    case AK_ENABLED:
+        if (cmd == CMD_SET) {
+            flask_adaptive_set_enabled(rd_u16(payload) != 0);
+        }
+        wr_u16(payload, flask_adaptive_enabled() ? 1 : 0);
+        return true;
+    case AK_SET_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_adaptive_set_count());
+        return true;
+    case AK_RULE_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_adaptive_rule_count());
+        return true;
+    case AK_STEP_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_adaptive_step_count());
+        return true;
+    case AK_RULE: {
+        if (payload_len < 1 + 1 + 4 + 2 + 1) {
+            return false;
+        }
+        uint8_t idx = payload[0];
+        struct flask_adaptive_rule r;
+
+        if (cmd == CMD_SET &&
+            flask_adaptive_rule_set(idx, payload[1], rd_u32(&payload[2]),
+                                    ((uint16_t)payload[6] << 8) | payload[7], payload[8]) != 0) {
+            return false;
+        }
+        if (flask_adaptive_rule_get(idx, &r) != 0) {
+            return false;
+        }
+        payload[1] = r.set;
+        wr_u32(&payload[2], r.trigger);
+        payload[6] = r.max_idle_ms >> 8;
+        payload[7] = r.max_idle_ms;
+        payload[8] = r.flags;
+        return true;
+    }
+    case AK_STEP: {
+        if (payload_len < 2 + 9) {
+            return false;
+        }
+        uint8_t idx = payload[0];
+        uint8_t step = payload[1];
+        struct flask_adaptive_rule r;
+
+        if (cmd == CMD_SET) {
+            struct flask_adaptive_step in;
+
+            ak_step_rd(&payload[2], &in);
+            if (flask_adaptive_step_set(idx, step, &in) != 0) {
+                return false;
+            }
+        }
+        if (flask_adaptive_rule_get(idx, &r) != 0 || step >= flask_adaptive_step_count()) {
+            return false;
+        }
+        ak_step_wr(&payload[2], &r.steps[step]);
+        return true;
+    }
+    case AK_FALLBACK: {
+        if (payload_len < 1 + 9) {
+            return false;
+        }
+        uint8_t set = payload[0];
+        struct flask_adaptive_step f;
+
+        if (cmd == CMD_SET) {
+            ak_step_rd(&payload[1], &f);
+            if (flask_adaptive_fallback_set(set, &f) != 0) {
+                return false;
+            }
+        }
+        if (flask_adaptive_fallback_get(set, &f) != 0) {
+            return false;
+        }
+        ak_step_wr(&payload[1], &f);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_ADAPTIVE */
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
 static void ht_put(uint8_t *payload, const struct flask_holdtap_timing *t, uint8_t flags) {
@@ -1720,6 +1873,10 @@ static bool handle_save(uint8_t channel) {
     case CH_HOLDTAP:
         return flask_holdtap_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+    case CH_ADAPTIVE:
+        return flask_adaptive_save() == 0;
+#endif
     default:
         return false;
     }
@@ -1853,6 +2010,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
         case CH_HOLDTAP:
             ok = handle_holdtap(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+        case CH_ADAPTIVE:
+            ok = handle_adaptive(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
         default:
@@ -2092,6 +2254,16 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         }
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "adaptive", &sub)) {
+            return flask_adaptive_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                   cb_arg);
+        }
+    }
+#endif
     return -ENOENT;
 }
 
@@ -2103,25 +2275,39 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
  * commit, whose order relative to this one is link-dependent — on a fresh
  * device the first pass can see unassigned ids. Retry on the flask_save
  * queue until every default resolves (bounded; idempotent). */
-#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
-static void combos_defaults_retry(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(combos_defaults_work, combos_defaults_retry);
-static int combos_defaults_tries;
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS) || IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+static void defaults_retry(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(defaults_work, defaults_retry);
+static int defaults_tries;
 
-static void combos_defaults_retry(struct k_work *work) {
+/* Sum of default bindings still lacking a behavior local id, over every
+ * module that seeds compiled defaults. Each commit is idempotent. */
+static int defaults_commit_all(void) {
+    int pending = 0;
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
+    pending += flask_combos_defaults_commit();
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+    pending += flask_adaptive_defaults_commit();
+#endif
+    return pending;
+}
+
+static void defaults_retry(struct k_work *work) {
     ARG_UNUSED(work);
 
-    if (flask_combos_defaults_commit() > 0 && ++combos_defaults_tries < 5) {
-        k_work_reschedule_for_queue(&flask_save_q, &combos_defaults_work, K_MSEC(500));
+    if (defaults_commit_all() > 0 && ++defaults_tries < 5) {
+        k_work_reschedule_for_queue(&flask_save_q, &defaults_work, K_MSEC(500));
     }
 }
 #endif
 
 static int flask_settings_commit(void) {
-#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)
-    if (flask_combos_defaults_commit() > 0) {
-        combos_defaults_tries = 0;
-        k_work_reschedule_for_queue(&flask_save_q, &combos_defaults_work, K_MSEC(500));
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS) || IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+    if (defaults_commit_all() > 0) {
+        defaults_tries = 0;
+        k_work_reschedule_for_queue(&flask_save_q, &defaults_work, K_MSEC(500));
     }
 #endif
     return 0;

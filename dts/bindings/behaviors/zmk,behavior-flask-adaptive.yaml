@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "Flask runtime adaptive-key trigger behavior. Param selects the adaptive
+  set; the set's rules and fallback (output depends on the last key typed)
+  are live-editable over the Flask protocol (channel 0x2B)."
+
+compatible: "zmk,behavior-flask-adaptive"
+
+properties:
+  display-name:
+    type: string
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+
+binding-cells:
+  - param1

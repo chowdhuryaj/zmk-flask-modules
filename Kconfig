@@ -272,6 +272,68 @@ config ZMK_BEHAVIOR_FLASK_TAPDANCE
     help
       Keymap behavior running a flask_tapdance slot: &ftd <slot>.
 
+config ZMK_FLASK_ADAPTIVE
+    bool "Flask runtime adaptive keys"
+    depends on SETTINGS
+    select ZMK_BEHAVIOR_LOCAL_IDS
+    help
+      Runtime-editable adaptive keys (channel 0x2B, proto v18): `&fak <set>`
+      fires an output chosen by the last key typed before it, with the
+      matching semantics of urob/zmk-adaptive-key but the const DT config
+      swapped for a live-editable rule table (a shared pool of rules, each a
+      trigger key + max idle ms + a 1..STEPS typed output sequence, plus a
+      fallback output per set). A keymap can compile default rules into it
+      via a `flask,adaptive-defaults` node pointing at its existing
+      zmk,behavior-adaptive-key nodes. LOCAL_IDS is selected so behavior
+      outputs and compiled defaults work on every image. Central-only on
+      splits (enable explicitly in the board .conf; the &fak keymap node
+      auto-enables only the behavior below).
+
+config ZMK_FLASK_ADAPTIVE_SETS
+    int "Adaptive key sets"
+    depends on ZMK_FLASK_ADAPTIVE
+    range 1 16
+    default 4
+
+config ZMK_FLASK_ADAPTIVE_RULES
+    int "Adaptive key rule pool size"
+    depends on ZMK_FLASK_ADAPTIVE
+    range 8 64
+    default 64
+    help
+      Rules shared by all sets (not per set). Bounded by the u64 save and
+      default bitmaps. Each rule is 8 + 11 * STEPS bytes of RAM and one
+      settings entry when edited.
+
+config ZMK_FLASK_ADAPTIVE_STEPS
+    int "Output steps per adaptive rule"
+    depends on ZMK_FLASK_ADAPTIVE
+    range 1 8
+    default 6
+    help
+      Typed steps one rule's output sequence can hold. The Totem defaults
+      need 6 ("ecause"). Changing it across a reflash drops saved rules
+      (settings entry size mismatch) and the compiled defaults reseed.
+
+config ZMK_FLASK_ADAPTIVE_TAP_MS
+    int "Adaptive sequence tap time (ms)"
+    depends on ZMK_FLASK_ADAPTIVE
+    default 5
+
+config ZMK_FLASK_ADAPTIVE_WAIT_MS
+    int "Adaptive sequence wait time (ms)"
+    depends on ZMK_FLASK_ADAPTIVE
+    default 5
+
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_ADAPTIVE := zmk,behavior-flask-adaptive
+
+config ZMK_BEHAVIOR_FLASK_ADAPTIVE
+    bool "Flask adaptive key behavior (&fak)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_ADAPTIVE))
+    depends on ZMK_FLASK_ADAPTIVE
+    help
+      Keymap behavior running a flask_adaptive set: &fak <set>.
+
 config ZMK_FLASK_HOLDTAP
     bool "Flask runtime hold-tap timing"
     depends on SETTINGS

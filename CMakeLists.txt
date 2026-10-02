@@ -22,6 +22,10 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   # csk links after combos: it must see the keycode events the combo
   # engine's typed outputs raise, not just raw taps.
   target_sources_ifdef(CONFIG_ZMK_FLASK_CSK app PRIVATE src/flask_csk.c)
+  # adaptive's last-key tracker links after csk for the same reason: it must
+  # see the final keycode events (csk's shifted substitutions included).
+  target_sources_ifdef(CONFIG_ZMK_FLASK_ADAPTIVE app PRIVATE src/flask_adaptive.c)
+  target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_ADAPTIVE app PRIVATE src/behavior_flask_adaptive.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_TAPDANCE app PRIVATE src/flask_tapdance.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_TAPDANCE app PRIVATE src/behavior_flask_tapdance.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_MACROS app PRIVATE src/flask_macros.c)
