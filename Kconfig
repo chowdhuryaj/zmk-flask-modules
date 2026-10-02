@@ -444,3 +444,36 @@ config ZMK_BEHAVIOR_FLASK_MACROS
     depends on ZMK_FLASK_MACROS
     help
       Keymap behavior playing a flask_macros slot: &fmac <slot>.
+
+config ZMK_FLASK_AUTOSHIFT
+    bool "Flask global auto shift + retro shift"
+    depends on SETTINGS
+    depends on ZMK_FLASK_PROTO
+    help
+      QMK-style auto shift (channel 0x2C, proto v19): hold a plain &kp
+      letter / digit / punctuation key past a timeout and its shifted
+      character is typed. Retro shift (flask_holdtap nodes whose tap is a
+      &kp): hold past the tapping term, release alone before the retro
+      limit, and the tap is shifted. Everything is runtime-tunable over the
+      Flask protocol and ships OFF. Plain keys are intercepted at the
+      position level (after flask_holdtap); combo outputs that are &kp are
+      covered too. No ZMK patch. Central-only on splits (enable explicitly
+      in the board .conf).
+
+config ZMK_FLASK_AUTOSHIFT_MAX_KEYS
+    int "Auto shift keys down at once"
+    depends on ZMK_FLASK_AUTOSHIFT
+    range 4 16
+    default 10
+    help
+      Eligible keys that can be down at the same time. Extra ones pass
+      through unshifted.
+
+config ZMK_FLASK_AUTOSHIFT_REPEAT_TERM_MS
+    int "Auto shift tap-then-hold window (ms)"
+    depends on ZMK_FLASK_AUTOSHIFT
+    range 50 1000
+    default 200
+    help
+      With key repeat on: re-pressing a key within this long of releasing it
+      holds the same output (QMK uses TAPPING_TERM; ZMK has no global term).

@@ -40,11 +40,16 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   # must see key events AFTER those capture engines, so its latch-swallow
   # decision matches what actually reaches the keymap.
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE app PRIVATE src/input_processor_flask_automouse.c)
-  # LAST among the central listeners on purpose: core hold-tap's listener
-  # sits after every module listener (module sources link before zmk's
-  # own), and this port must hold the same relative position — after
-  # combos/leader/automouse capture, before core hold-tap and the keymap.
+  # Holdtap is LAST among the central listeners except autoshift: core
+  # hold-tap's listener sits after every module listener (module sources
+  # link before zmk's own), and this port must hold the same relative
+  # position — after combos/leader/automouse capture, before core hold-tap
+  # and the keymap.
   target_sources_ifdef(CONFIG_ZMK_FLASK_HOLDTAP app PRIVATE src/behavior_flask_holdtap.c)
+  # Autoshift links right AFTER holdtap on purpose: it must see positions
+  # after holdtap's capture/replay and before the keymap (it swallows &kp
+  # presses the keymap would otherwise type).
+  target_sources_ifdef(CONFIG_ZMK_FLASK_AUTOSHIFT app PRIVATE src/flask_autoshift.c)
   if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
     target_sources(app PRIVATE src/flask_rgb_split_central.c)
   endif()

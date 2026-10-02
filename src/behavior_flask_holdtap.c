@@ -44,6 +44,13 @@
  * prior-idle 0; a flask,holdtap-defaults node seeds per-slot defaults
  * (each child: key-positions = slots, timing, optional display-name).
  *
+ * Retro shift (flask_autoshift, proto v19): a node whose hold and tap are
+ * `&kp` (hold may also be `&mo`) takes the global auto shift setting: past
+ * the autoshift timeout a lone release types the SHIFTED tap, and past the
+ * tapping term the hold is deferred (never pressed) until the retro limit,
+ * another key press, or release alone. With autoshift off every added line
+ * is a no-op and the engine behaves exactly as without it.
+ *
  * ===================== WIRE (Flask channel 0x2A, proto v17) =============
  * Frame: 32-byte raw-HID report [cmd, channel, value_id, payload...].
  * cmd 0x07 SET / 0x08 GET / 0x09 SAVE. Unhandled frames echo with cmd
@@ -103,6 +110,10 @@
 #include <zmk/events/keycode_state_changed.h>
 
 #include <flask_holdtap/flask_holdtap.h>
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+#include <flask_autoshift/flask_autoshift.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -350,6 +361,7 @@ struct behavior_hold_tap_config {
     bool hold_while_undecided_linger;
     bool retro_tap;
     bool hold_trigger_on_release;
+    bool retro_shape; /* tap is &kp and hold is &kp / &mo: retro shift may apply */
     int16_t slot; /* timing slot; -1 = the pressed key position */
     int32_t hold_trigger_key_positions_len;
     int32_t hold_trigger_key_positions[];
@@ -377,6 +389,13 @@ struct active_hold_tap {
 
     // initialized to -1, which is to be interpreted as "no other key has been pressed yet"
     int32_t position_of_first_other_key_pressed;
+
+    /* Retro shift (snapshot at key-down; all zero = off). */
+    bool as_retro;
+    bool as_interrupted;   /* another key went down while undecided: never shifts */
+    bool as_limit_armed;   /* the scheduled work is the retro limit, not the term */
+    uint16_t as_timeout_ms;
+    uint16_t as_limit_ms;  /* 0 = no limit */
 };
 
 static struct active_hold_tap *undecided_hold_tap = NULL;
@@ -564,6 +583,17 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
         active_hold_taps[i].param_tap = param_tap;
         active_hold_taps[i].timestamp = event->timestamp;
         active_hold_taps[i].position_of_first_other_key_pressed = -1;
+        active_hold_taps[i].as_retro = false;
+        active_hold_taps[i].as_interrupted = false;
+        active_hold_taps[i].as_limit_armed = false;
+        active_hold_taps[i].as_timeout_ms = 0;
+        active_hold_taps[i].as_limit_ms = 0;
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+        active_hold_taps[i].as_retro =
+            config->retro_shape && !config->hold_while_undecided &&
+            flask_autoshift_retro_snapshot(param_tap, &active_hold_taps[i].as_timeout_ms,
+                                           &active_hold_taps[i].as_limit_ms);
+#endif
         return &active_hold_taps[i];
     }
     return NULL;
@@ -573,6 +603,8 @@ static void clear_hold_tap(struct active_hold_tap *hold_tap) {
     hold_tap->position = ZMK_BHV_HOLD_TAP_POSITION_NOT_USED;
     hold_tap->status = STATUS_UNDECIDED;
     hold_tap->work_is_cancelled = false;
+    hold_tap->as_retro = false;
+    hold_tap->as_limit_armed = false;
 }
 
 static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_moment event) {
@@ -706,8 +738,13 @@ static int release_tap_binding(struct active_hold_tap *hold_tap) {
     return zmk_behavior_invoke_binding(&binding, event, false);
 }
 
+/* Core retro-tap, or retro shift: past the term the hold is deferred. */
+static bool is_retro(const struct active_hold_tap *hold_tap) {
+    return hold_tap->config->retro_tap || hold_tap->as_retro;
+}
+
 static int press_binding(struct active_hold_tap *hold_tap) {
-    if (hold_tap->config->retro_tap && hold_tap->status == STATUS_HOLD_TIMER) {
+    if (is_retro(hold_tap) && hold_tap->status == STATUS_HOLD_TIMER) {
         return 0;
     }
 
@@ -727,7 +764,7 @@ static int press_binding(struct active_hold_tap *hold_tap) {
 }
 
 static int release_binding(struct active_hold_tap *hold_tap) {
-    if (hold_tap->config->retro_tap && hold_tap->status == STATUS_HOLD_TIMER) {
+    if (is_retro(hold_tap) && hold_tap->status == STATUS_HOLD_TIMER) {
         return 0;
     }
 
@@ -807,7 +844,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
 }
 
 static void decide_retro_tap(struct active_hold_tap *hold_tap) {
-    if (!hold_tap->config->retro_tap) {
+    if (!is_retro(hold_tap)) {
         return;
     }
     if (hold_tap->status == STATUS_HOLD_TIMER) {
@@ -822,8 +859,7 @@ static void update_hold_status_for_retro_tap(uint32_t ignore_position) {
     for (int i = 0; i < ZMK_BHV_HOLD_TAP_MAX_HELD; i++) {
         struct active_hold_tap *hold_tap = &active_hold_taps[i];
         if (hold_tap->position == ignore_position ||
-            hold_tap->position == ZMK_BHV_HOLD_TAP_POSITION_NOT_USED ||
-            hold_tap->config->retro_tap == false) {
+            hold_tap->position == ZMK_BHV_HOLD_TAP_POSITION_NOT_USED || !is_retro(hold_tap)) {
             continue;
         }
         if (hold_tap->status == STATUS_HOLD_TIMER) {
@@ -881,9 +917,28 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+    /* Retro shift: released alone after the autoshift timeout -> the tap is
+     * the shifted character. Press and release of the tap both use this
+     * param. A tap already pressed (quick-tap) is never touched. */
+    if (hold_tap->as_retro && !hold_tap->as_interrupted &&
+        (hold_tap->status == STATUS_UNDECIDED || hold_tap->status == STATUS_HOLD_TIMER) &&
+        event.timestamp - hold_tap->timestamp >= hold_tap->as_timeout_ms &&
+        flask_autoshift_mods_allow()) {
+        hold_tap->param_tap = flask_autoshift_shifted(hold_tap->param_tap);
+    }
+#endif
+
     int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
     if (event.timestamp > (hold_tap->timestamp + hold_tap->timing.term_ms)) {
         decide_hold_tap(hold_tap, HT_TIMER_EVENT);
+    }
+    if (hold_tap->as_retro && hold_tap->status == STATUS_HOLD_TIMER && hold_tap->as_limit_ms &&
+        event.timestamp - hold_tap->timestamp >= hold_tap->as_limit_ms) {
+        /* Released past the retro limit before its work item ran: the hold
+         * was due at the limit, so it stands (no tap). */
+        hold_tap->status = STATUS_HOLD_INTERRUPT;
+        press_binding(hold_tap);
     }
 
     decide_hold_tap(hold_tap, HT_KEY_UP);
@@ -957,6 +1012,12 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
 
     if (undecided_hold_tap == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    /* Retro shift: a roll never shifts. Own flag: position_of_first_other_
+     * key_pressed is set on RELEASE for hold-trigger-on-release nodes. */
+    if (ev->state && ev->position != undecided_hold_tap->position) {
+        undecided_hold_tap->as_interrupted = true;
     }
 
     if ((undecided_hold_tap->config->hold_trigger_on_release != ev->state) &&
@@ -1037,8 +1098,28 @@ static void behavior_flask_hold_tap_timer_work_handler(struct k_work *item) {
 
     if (hold_tap->work_is_cancelled) {
         clear_hold_tap(hold_tap);
+    } else if (hold_tap->as_limit_armed) {
+        /* Retro limit reached: the deferred hold stands. */
+        hold_tap->as_limit_armed = false;
+        if (hold_tap->status == STATUS_HOLD_TIMER) {
+            hold_tap->status = STATUS_HOLD_INTERRUPT;
+            press_binding(hold_tap);
+        }
     } else {
         decide_hold_tap(hold_tap, HT_TIMER_EVENT);
+        if (hold_tap->as_retro && hold_tap->status == STATUS_HOLD_TIMER && hold_tap->as_limit_ms) {
+            /* The term passed and the hold is deferred; give it until the
+             * limit (L <= term: none, the hold is due now). */
+            int64_t left = hold_tap->timestamp + hold_tap->as_limit_ms - k_uptime_get();
+
+            if (left <= 0) {
+                hold_tap->status = STATUS_HOLD_INTERRUPT;
+                press_binding(hold_tap);
+            } else {
+                hold_tap->as_limit_armed = true;
+                k_work_schedule(&hold_tap->work, K_MSEC(left));
+            }
+        }
     }
 }
 
@@ -1056,6 +1137,13 @@ static int behavior_flask_hold_tap_init(const struct device *dev) {
     return 0;
 }
 
+/* Retro shift applies to QMK's IS_RETRO shapes: tap `&kp`, hold `&kp` (MT) or
+ * `&mo` (LT). Decided per node at compile time from the bindings' compats. */
+#define FHT_RETRO_SHAPE(n)                                                                         \
+    (DT_NODE_HAS_COMPAT(DT_INST_PHANDLE_BY_IDX(n, bindings, 1), zmk_behavior_key_press) &&         \
+     (DT_NODE_HAS_COMPAT(DT_INST_PHANDLE_BY_IDX(n, bindings, 0), zmk_behavior_key_press) ||        \
+      DT_NODE_HAS_COMPAT(DT_INST_PHANDLE_BY_IDX(n, bindings, 0), zmk_behavior_momentary_layer)))
+
 #define FHT_INST(n)                                                                                \
     static const struct behavior_hold_tap_config behavior_flask_hold_tap_config_##n = {            \
         .hold_behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(n, bindings, 0)),               \
@@ -1064,6 +1152,7 @@ static int behavior_flask_hold_tap_init(const struct device *dev) {
         .hold_while_undecided_linger = DT_INST_PROP(n, hold_while_undecided_linger),               \
         .retro_tap = DT_INST_PROP(n, retro_tap),                                                   \
         .hold_trigger_on_release = DT_INST_PROP(n, hold_trigger_on_release),                       \
+        .retro_shape = FHT_RETRO_SHAPE(n),                                                         \
         .slot = DT_INST_PROP_OR(n, slot, -1),                                                      \
         .hold_trigger_key_positions = DT_INST_PROP(n, hold_trigger_key_positions),                 \
         .hold_trigger_key_positions_len = DT_INST_PROP_LEN(n, hold_trigger_key_positions),         \

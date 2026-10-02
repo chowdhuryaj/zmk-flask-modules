@@ -58,6 +58,9 @@
 #if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
 #include <flask_macros/flask_macros.h>
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+#include <flask_autoshift/flask_autoshift.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -172,6 +175,14 @@ struct active_rt {
 static void fire_output(const struct active_rt *a, bool pressed, int64_t timestamp) {
     switch (a->action) {
     case FLASK_COMBO_OUT_USAGE:
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+        /* Auto shift covers combo outputs (QMK routes combos through it). */
+        if (pressed ? flask_autoshift_key_press(FLASK_AUTOSHIFT_ID_COMBO(a->slot), a->param1,
+                                                timestamp)
+                    : flask_autoshift_key_release(FLASK_AUTOSHIFT_ID_COMBO(a->slot), timestamp)) {
+            return;
+        }
+#endif
         if (a->param1 != 0) {
             raise_zmk_keycode_state_changed_from_encoded(a->param1, pressed, timestamp);
         }
@@ -194,6 +205,15 @@ static void fire_output(const struct active_rt *a, bool pressed, int64_t timesta
             LOG_WRN("flask_combos: behavior id %u not found", a->behavior_id);
             return;
         }
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+        if (flask_autoshift_is_kp(name) &&
+            (pressed ? flask_autoshift_key_press(FLASK_AUTOSHIFT_ID_COMBO(a->slot), a->param1,
+                                                 timestamp)
+                     : flask_autoshift_key_release(FLASK_AUTOSHIFT_ID_COMBO(a->slot),
+                                                   timestamp))) {
+            return;
+        }
+#endif
         struct zmk_behavior_binding binding = {
             .behavior_dev = name,
             .param1 = a->param1,

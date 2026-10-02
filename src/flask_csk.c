@@ -100,6 +100,14 @@ static bool match_slot(uint8_t page, uint16_t id, uint32_t *repl) {
     return hit;
 }
 
+/* Pair lookup for flask_autoshift: the shifted form of a keymap-encoded
+ * usage (page 0 = keyboard page). Honors `enabled`; mods bits are ignored. */
+bool flask_csk_lookup(uint32_t usage, uint32_t *repl) {
+    uint8_t page = ENC_PAGE(usage);
+
+    return match_slot(page ? page : 7, ENC_ID(usage), repl);
+}
+
 static void apply_replacement(struct zmk_keycode_state_changed *ev, uint32_t repl) {
     ev->usage_page = ENC_PAGE(repl);
     ev->keycode = ENC_ID(repl);
