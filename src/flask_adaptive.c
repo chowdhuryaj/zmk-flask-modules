@@ -380,7 +380,6 @@ struct ak_press {
 };
 
 static struct ak_press presses[AK_MAX_HELD];
-static uint8_t fire_depth;
 
 static int adaptive_press(uint8_t set, struct zmk_behavior_binding_event event) {
     struct flask_adaptive_step seq[FLASK_ADAPTIVE_STEPS];
@@ -438,12 +437,12 @@ static int adaptive_press(uint8_t set, struct zmk_behavior_binding_event event) 
 int flask_adaptive_pressed(uint8_t set, struct zmk_behavior_binding_event event) {
     int ret;
 
-    if (!FLASK_GUARD_ENTER(fire_depth)) {
+    if (!FLASK_GUARD_ENTER()) {
         LOG_WRN("flask_adaptive: output recursion past depth %d refused", FLASK_GUARD_MAX_DEPTH);
         return 0;
     }
     ret = adaptive_press(set, event);
-    FLASK_GUARD_LEAVE(fire_depth);
+    FLASK_GUARD_LEAVE();
     return ret;
 }
 

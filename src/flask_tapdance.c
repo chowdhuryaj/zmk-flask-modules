@@ -149,7 +149,6 @@ static void fire_output_raw(const struct flask_tapdance_output *out, uint32_t po
 }
 
 /* Depth cap: &ftd output -> &ftd/&fak -> ... must end, not overflow the stack. */
-static uint8_t fire_depth;
 
 static void fire_output(const struct flask_tapdance_output *out, uint32_t position, bool pressed,
                         int64_t timestamp) {
@@ -157,12 +156,12 @@ static void fire_output(const struct flask_tapdance_output *out, uint32_t positi
         fire_output_raw(out, position, pressed, timestamp);
         return;
     }
-    if (!FLASK_GUARD_ENTER(fire_depth)) {
+    if (!FLASK_GUARD_ENTER()) {
         LOG_WRN("flask_tapdance: output recursion past depth %d refused", FLASK_GUARD_MAX_DEPTH);
         return;
     }
     fire_output_raw(out, position, pressed, timestamp);
-    FLASK_GUARD_LEAVE(fire_depth);
+    FLASK_GUARD_LEAVE();
 }
 
 static struct active_dance *find_dance(uint32_t position) {

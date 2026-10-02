@@ -21,10 +21,15 @@
 
 #define FLASK_GUARD_MAX_DEPTH 2
 
-/* Each engine owns one `static uint8_t depth`. ENTER returns false (and
- * the caller must skip the fire) once the cap is hit. */
-#define FLASK_GUARD_ENTER(depth) ((depth) < FLASK_GUARD_MAX_DEPTH ? (++(depth), true) : false)
-#define FLASK_GUARD_LEAVE(depth) (--(depth))
+/* ONE depth counter shared by every engine (cap FLASK_GUARD_MAX_DEPTH
+ * overall, so ftd -> fak -> ftd nests 2 frames, not 2 per engine). A weak
+ * definition in the header merges into a single object at link time and
+ * works whichever engines are built. ENTER returns false (and the caller
+ * must skip the fire) once the cap is hit; releases never call it. */
+uint8_t flask_guard_depth __attribute__((weak));
+
+#define FLASK_GUARD_ENTER() (flask_guard_depth < FLASK_GUARD_MAX_DEPTH ? (++flask_guard_depth, true) : false)
+#define FLASK_GUARD_LEAVE() (--flask_guard_depth)
 
 static inline bool flask_behavior_id_is_dispatcher(uint16_t id) {
     zmk_behavior_local_id_t found;
