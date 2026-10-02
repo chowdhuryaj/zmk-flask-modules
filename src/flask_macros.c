@@ -50,16 +50,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* --- config (spinlocked: raw-HID writes race playback reads) --- */
 
+/* Scalars live outside the table on purpose: one nonzero initializer would put the
+ * whole table in .data (flash image + boot copy). The table itself is zero-init .bss. */
+static bool cfg_enabled = true;
+static uint16_t cfg_tap_ms = TAP_DEFAULT_MS;
+static uint16_t cfg_wait_ms = WAIT_DEFAULT_MS;
 static struct {
-    bool enabled;
-    uint16_t tap_ms;
-    uint16_t wait_ms;
     struct flask_macro_step steps[FLASK_MACROS_SLOTS][FLASK_MACROS_STEPS];
-} cfg = {
-    .enabled = true,
-    .tap_ms = TAP_DEFAULT_MS,
-    .wait_ms = WAIT_DEFAULT_MS,
-};
+} cfg;
 
 static struct k_spinlock cfg_lock;
 
@@ -81,6 +79,7 @@ static bool tap_up_pending;
 static uint32_t tap_up_usage;
 static uint32_t held[MAX_HELD];
 static uint8_t held_count;
+static bool stop_requested; /* set by flask_macros_stop(); the work item does the releases */
 
 static struct k_work_delayable play_task;
 
@@ -111,6 +110,7 @@ static void finish_playback(void) {
         play_slot = -1;
         play_step = 0;
         tap_up_pending = false;
+        stop_requested = false;
     }
     for (int i = 0; i < n; i++) {
         raise_usage(release[i], false);
@@ -127,7 +127,10 @@ static void play_task_handler(struct k_work *work) {
     int32_t next_delay = -1;
 
     K_SPINLOCK(&cfg_lock) {
-        if (play_slot < 0) {
+        if (stop_requested) {
+            stop_requested = false;
+            done = true; /* finish_playback below releases on this thread */
+        } else if (play_slot < 0) {
             /* Stopped between schedule and run. */
         } else if (tap_up_pending) {
             tap_up_pending = false;
@@ -140,7 +143,7 @@ static void play_task_handler(struct k_work *work) {
             if (held_count > 0 && held[held_count - 1] == tap_up_usage) {
                 held_count--;
             }
-            next_delay = cfg.wait_ms;
+            next_delay = cfg_wait_ms;
         } else if (play_step >= FLASK_MACROS_STEPS) {
             done = true;
         } else {
@@ -157,17 +160,21 @@ static void play_task_handler(struct k_work *work) {
                 }
                 tap_up_pending = true;
                 tap_up_usage = s.param;
-                next_delay = cfg.tap_ms;
+                next_delay = cfg_tap_ms;
                 break;
             case FLASK_MACRO_ACTION_PRESS:
                 play_step++;
+                next_delay = cfg_wait_ms;
+                /* Untracked presses would stay stuck after the macro ends:
+                 * with the held stack full, skip the press instead. */
+                if (held_count >= MAX_HELD) {
+                    LOG_WRN("flask_macros: more than %d held presses, step skipped", MAX_HELD);
+                    break;
+                }
+                held[held_count++] = s.param;
                 raise_param = s.param;
                 raise_pressed = true;
                 do_raise = true;
-                if (held_count < MAX_HELD) {
-                    held[held_count++] = s.param;
-                }
-                next_delay = cfg.wait_ms;
                 break;
             case FLASK_MACRO_ACTION_RELEASE:
                 play_step++;
@@ -180,7 +187,7 @@ static void play_task_handler(struct k_work *work) {
                         break;
                     }
                 }
-                next_delay = cfg.wait_ms;
+                next_delay = cfg_wait_ms;
                 break;
             case FLASK_MACRO_ACTION_WAIT:
                 play_step++;
@@ -202,7 +209,8 @@ static void play_task_handler(struct k_work *work) {
         return;
     }
     if (next_delay >= 0) {
-        k_work_reschedule(&play_task, K_MSEC(next_delay));
+        /* A stop that landed mid-step must not wait out this step's delay. */
+        k_work_reschedule(&play_task, stop_requested ? K_NO_WAIT : K_MSEC(next_delay));
     }
 }
 
@@ -211,13 +219,13 @@ static void play_task_handler(struct k_work *work) {
 bool flask_macros_enabled(void) {
     bool on;
 
-    K_SPINLOCK(&cfg_lock) { on = cfg.enabled; }
+    K_SPINLOCK(&cfg_lock) { on = cfg_enabled; }
     return on;
 }
 
 void flask_macros_set_enabled(bool on) {
     K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = on;
+        cfg_enabled = on;
         cfg_dirty = true;
     }
     if (!on) {
@@ -228,14 +236,14 @@ void flask_macros_set_enabled(bool on) {
 uint16_t flask_macros_tap_ms(void) {
     uint16_t ms;
 
-    K_SPINLOCK(&cfg_lock) { ms = cfg.tap_ms; }
+    K_SPINLOCK(&cfg_lock) { ms = cfg_tap_ms; }
     return ms;
 }
 
 void flask_macros_set_tap_ms(uint16_t ms) {
     ms = CLAMP(ms, TAP_MIN_MS, TAP_MAX_MS);
     K_SPINLOCK(&cfg_lock) {
-        cfg.tap_ms = ms;
+        cfg_tap_ms = ms;
         cfg_dirty = true;
     }
 }
@@ -243,14 +251,14 @@ void flask_macros_set_tap_ms(uint16_t ms) {
 uint16_t flask_macros_wait_ms(void) {
     uint16_t ms;
 
-    K_SPINLOCK(&cfg_lock) { ms = cfg.wait_ms; }
+    K_SPINLOCK(&cfg_lock) { ms = cfg_wait_ms; }
     return ms;
 }
 
 void flask_macros_set_wait_ms(uint16_t ms) {
     ms = CLAMP(ms, WAIT_MIN_MS, WAIT_MAX_MS);
     K_SPINLOCK(&cfg_lock) {
-        cfg.wait_ms = ms;
+        cfg_wait_ms = ms;
         cfg_dirty = true;
     }
 }
@@ -298,7 +306,7 @@ int flask_macros_play(uint8_t slot) {
     }
 
     K_SPINLOCK(&cfg_lock) {
-        if (!cfg.enabled) {
+        if (!cfg_enabled) {
             /* -EACCES below */
         } else if (play_slot >= 0) {
             /* -EBUSY below */
@@ -321,9 +329,18 @@ int flask_macros_play(uint8_t slot) {
     return 0;
 }
 
+/* Releases come from the work item, never the caller's thread (raw-HID
+ * delivery): keycode events and HID report edits stay on one thread. */
 void flask_macros_stop(void) {
-    k_work_cancel_delayable(&play_task);
-    finish_playback();
+    bool playing;
+
+    K_SPINLOCK(&cfg_lock) {
+        playing = play_slot >= 0;
+        stop_requested = playing;
+    }
+    if (playing) {
+        k_work_reschedule(&play_task, K_NO_WAIT);
+    }
 }
 
 int flask_macros_playing_slot(void) {
@@ -362,9 +379,9 @@ int flask_macros_save(void) {
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
-        saved.enabled = cfg.enabled ? 1 : 0;
-        saved.tap_ms = cfg.tap_ms;
-        saved.wait_ms = cfg.wait_ms;
+        saved.enabled = cfg_enabled ? 1 : 0;
+        saved.tap_ms = cfg_tap_ms;
+        saved.wait_ms = cfg_wait_ms;
         pending = slots_dirty;
         saved_bits = slots_saved;
         write_cfg = cfg_dirty || !cfg_saved;
@@ -449,9 +466,9 @@ int flask_macros_settings_restore(const char *sub, size_t len, settings_read_cb 
             return 0;
         }
         K_SPINLOCK(&cfg_lock) {
-            cfg.enabled = saved.enabled != 0;
-            cfg.tap_ms = CLAMP(saved.tap_ms, TAP_MIN_MS, TAP_MAX_MS);
-            cfg.wait_ms = CLAMP(saved.wait_ms, WAIT_MIN_MS, WAIT_MAX_MS);
+            cfg_enabled = saved.enabled != 0;
+            cfg_tap_ms = CLAMP(saved.tap_ms, TAP_MIN_MS, TAP_MAX_MS);
+            cfg_wait_ms = CLAMP(saved.wait_ms, WAIT_MIN_MS, WAIT_MAX_MS);
             cfg_saved = true;
             cfg_dirty = false;
         }

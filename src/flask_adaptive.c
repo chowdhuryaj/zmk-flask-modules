@@ -43,6 +43,7 @@
 #include <zmk/keymap.h>
 
 #include <flask_adaptive/flask_adaptive.h>
+#include <flask_loop_guard.h>
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
 #include <flask_macros/flask_macros.h>
@@ -84,13 +85,13 @@ static const char *const AK_FMAC_NAME = AK_FMAC_NAME_INIT;
 
 /* --- config (spinlocked: raw-HID writes race the engine) --- */
 
+/* Scalars live outside the table on purpose: one nonzero initializer would put the
+ * whole table in .data (flash image + boot copy). The table itself is zero-init .bss. */
+static bool cfg_enabled = true;
 static struct {
-    bool enabled;
     struct flask_adaptive_rule rules[FLASK_ADAPTIVE_RULES];
     struct flask_adaptive_step fallback[FLASK_ADAPTIVE_SETS];
-} cfg = {
-    .enabled = true,
-};
+} cfg;
 
 static struct k_spinlock cfg_lock;
 
@@ -215,17 +216,7 @@ static uint32_t norm_trigger(uint32_t t) {
     return t;
 }
 
-static bool is_self_id(uint16_t id) {
-    zmk_behavior_local_id_t self;
-
-    if (AK_SELF_NAME == NULL) {
-        return false;
-    }
-    self = zmk_behavior_get_local_id(AK_SELF_NAME);
-    return self != 0 && self != UINT16_MAX && self == id;
-}
-
-/* flask_tapdance_output_set normalization, verbatim, plus no recursion. */
+/* flask_tapdance_output_set normalization, verbatim, plus no recursion (&fak or &ftd). */
 static void step_normalize(struct flask_adaptive_step *out) {
     if (out->action > FLASK_AK_OUT_MAX) {
         out->action = FLASK_AK_OUT_NONE;
@@ -233,7 +224,7 @@ static void step_normalize(struct flask_adaptive_step *out) {
     if (out->action == FLASK_AK_OUT_USAGE && out->param1 == 0) {
         out->action = FLASK_AK_OUT_NONE;
     }
-    if (out->action == FLASK_AK_OUT_BEHAVIOR && is_self_id(out->behavior_id)) {
+    if (out->action == FLASK_AK_OUT_BEHAVIOR && flask_behavior_id_is_dispatcher(out->behavior_id)) {
         out->action = FLASK_AK_OUT_NONE;
     }
     if (out->action == FLASK_AK_OUT_NONE) {
@@ -305,7 +296,7 @@ static uint8_t pick_locked(uint8_t set, int64_t t, struct flask_adaptive_step *s
     uint8_t n = 0;
     bool matched = false;
 
-    if (cfg.enabled && last.valid) {
+    if (cfg_enabled && last.valid) {
         for (int i = 0; i < FLASK_ADAPTIVE_RULES && !matched; i++) {
             const struct flask_adaptive_rule *r = &cfg.rules[i];
             uint32_t trig = r->trigger;
@@ -389,8 +380,9 @@ struct ak_press {
 };
 
 static struct ak_press presses[AK_MAX_HELD];
+static uint8_t fire_depth;
 
-int flask_adaptive_pressed(uint8_t set, struct zmk_behavior_binding_event event) {
+static int adaptive_press(uint8_t set, struct zmk_behavior_binding_event event) {
     struct flask_adaptive_step seq[FLASK_ADAPTIVE_STEPS];
     struct zmk_behavior_binding bs[FLASK_ADAPTIVE_STEPS];
     uint8_t n = 0;
@@ -442,6 +434,19 @@ int flask_adaptive_pressed(uint8_t set, struct zmk_behavior_binding_event event)
     return zmk_behavior_queue_add(&event, bs[m - 1], true, CONFIG_ZMK_FLASK_ADAPTIVE_TAP_MS);
 }
 
+/* Depth cap: a stale table with &fak -> &ftd -> &fak must end, not overflow the stack. */
+int flask_adaptive_pressed(uint8_t set, struct zmk_behavior_binding_event event) {
+    int ret;
+
+    if (!FLASK_GUARD_ENTER(fire_depth)) {
+        LOG_WRN("flask_adaptive: output recursion past depth %d refused", FLASK_GUARD_MAX_DEPTH);
+        return 0;
+    }
+    ret = adaptive_press(set, event);
+    FLASK_GUARD_LEAVE(fire_depth);
+    return ret;
+}
+
 int flask_adaptive_released(uint8_t set, struct zmk_behavior_binding_event event) {
     ARG_UNUSED(set);
 
@@ -456,7 +461,7 @@ int flask_adaptive_released(uint8_t set, struct zmk_behavior_binding_event event
         if (n > 1) {
             return zmk_behavior_queue_add(&event, b, false, CONFIG_ZMK_FLASK_ADAPTIVE_WAIT_MS);
         }
-        return zmk_behavior_invoke_binding(&b, event, false);
+        return zmk_behavior_invoke_binding(&b, event, false); /* releases terminate */
     }
     return 0;
 }
@@ -466,13 +471,13 @@ int flask_adaptive_released(uint8_t set, struct zmk_behavior_binding_event event
 bool flask_adaptive_enabled(void) {
     bool on;
 
-    K_SPINLOCK(&cfg_lock) { on = cfg.enabled; }
+    K_SPINLOCK(&cfg_lock) { on = cfg_enabled; }
     return on;
 }
 
 void flask_adaptive_set_enabled(bool on) {
     K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = on;
+        cfg_enabled = on;
         cfg_dirty = true;
     }
 }
@@ -571,7 +576,7 @@ int flask_adaptive_save(void) {
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
-        saved.enabled = cfg.enabled ? 1 : 0;
+        saved.enabled = cfg_enabled ? 1 : 0;
         pending_r = rules_dirty;
         saved_r = rules_saved;
         pending_f = fb_dirty;
@@ -691,7 +696,7 @@ int flask_adaptive_settings_restore(const char *sub, size_t len, settings_read_c
             return 0;
         }
         K_SPINLOCK(&cfg_lock) {
-            cfg.enabled = saved.enabled != 0;
+            cfg_enabled = saved.enabled != 0;
             cfg_saved = true;
             cfg_dirty = false;
         }

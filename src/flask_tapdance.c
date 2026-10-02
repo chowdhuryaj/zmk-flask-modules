@@ -40,6 +40,7 @@
 #include <zmk/keymap.h>
 
 #include <flask_tapdance/flask_tapdance.h>
+#include <flask_loop_guard.h>
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_MACROS)
 #include <flask_macros/flask_macros.h>
@@ -56,12 +57,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* --- config (spinlocked: raw-HID writes race the engine) --- */
 
+/* Scalars live outside the table on purpose: one nonzero initializer would put the
+ * whole table in .data (flash image + boot copy). The table itself is zero-init .bss. */
+static bool cfg_enabled = true;
 static struct {
-    bool enabled;
     struct flask_tapdance_slot slots[FLASK_TAPDANCE_SLOTS];
-} cfg = {
-    .enabled = true,
-};
+} cfg;
 
 static struct k_spinlock cfg_lock;
 
@@ -100,8 +101,8 @@ struct active_dance {
 
 static struct active_dance dances[TD_MAX_HELD];
 
-static void fire_output(const struct flask_tapdance_output *out, uint32_t position, bool pressed,
-                        int64_t timestamp) {
+static void fire_output_raw(const struct flask_tapdance_output *out, uint32_t position,
+                            bool pressed, int64_t timestamp) {
     switch (out->action) {
     case FLASK_TD_OUT_USAGE:
         if (out->param1 != 0) {
@@ -147,6 +148,23 @@ static void fire_output(const struct flask_tapdance_output *out, uint32_t positi
     }
 }
 
+/* Depth cap: &ftd output -> &ftd/&fak -> ... must end, not overflow the stack. */
+static uint8_t fire_depth;
+
+static void fire_output(const struct flask_tapdance_output *out, uint32_t position, bool pressed,
+                        int64_t timestamp) {
+    if (!pressed) { /* releases terminate (the dance is already cleared) */
+        fire_output_raw(out, position, pressed, timestamp);
+        return;
+    }
+    if (!FLASK_GUARD_ENTER(fire_depth)) {
+        LOG_WRN("flask_tapdance: output recursion past depth %d refused", FLASK_GUARD_MAX_DEPTH);
+        return;
+    }
+    fire_output_raw(out, position, pressed, timestamp);
+    FLASK_GUARD_LEAVE(fire_depth);
+}
+
 static struct active_dance *find_dance(uint32_t position) {
     for (int i = 0; i < TD_MAX_HELD; i++) {
         if (dances[i].position == position && !dances[i].timer_cancelled) {
@@ -165,15 +183,17 @@ static void stop_timer(struct active_dance *d) {
 }
 
 static void press_dance(struct active_dance *d, int64_t timestamp) {
-    uint8_t idx;
-
     d->decided = true;
     K_SPINLOCK(&cfg_lock) {
         const struct flask_tapdance_slot *s = &cfg.slots[d->slot];
         uint8_t len = slot_len(s);
 
-        idx = MIN((uint8_t)d->counter, len) - 1;
-        d->fired = s->taps[idx];
+        /* Slot emptied mid-dance: len 0 would index taps[255]. NONE is a no-op. */
+        if (len == 0) {
+            memset(&d->fired, 0, sizeof(d->fired));
+        } else {
+            d->fired = s->taps[MIN((uint8_t)d->counter, len) - 1];
+        }
     }
     fire_output(&d->fired, d->position, true, timestamp);
 }
@@ -211,7 +231,7 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
         return -EINVAL;
     }
     K_SPINLOCK(&cfg_lock) {
-        enabled = cfg.enabled;
+        enabled = cfg_enabled;
         len = slot_len(&cfg.slots[slot]);
         if (cfg.slots[slot].term_ms) {
             term = cfg.slots[slot].term_ms;
@@ -309,13 +329,13 @@ ZMK_SUBSCRIPTION(flask_tapdance, zmk_position_state_changed);
 bool flask_tapdance_enabled(void) {
     bool on;
 
-    K_SPINLOCK(&cfg_lock) { on = cfg.enabled; }
+    K_SPINLOCK(&cfg_lock) { on = cfg_enabled; }
     return on;
 }
 
 void flask_tapdance_set_enabled(bool on) {
     K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = on;
+        cfg_enabled = on;
         cfg_dirty = true;
     }
 }
@@ -357,6 +377,9 @@ int flask_tapdance_output_set(uint8_t idx, uint8_t tap, const struct flask_tapda
     }
     if (out.action == FLASK_TD_OUT_USAGE && out.param1 == 0) {
         out.action = FLASK_TD_OUT_NONE;
+    }
+    if (out.action == FLASK_TD_OUT_BEHAVIOR && flask_behavior_id_is_dispatcher(out.behavior_id)) {
+        out.action = FLASK_TD_OUT_NONE; /* &ftd/&fak output would re-enter at this position */
     }
     if (out.action == FLASK_TD_OUT_NONE) {
         out.behavior_id = 0;
@@ -404,7 +427,7 @@ int flask_tapdance_save(void) {
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
-        saved.enabled = cfg.enabled ? 1 : 0;
+        saved.enabled = cfg_enabled ? 1 : 0;
         memcpy(slots, cfg.slots, sizeof(slots));
         pending = slots_dirty;
         saved_bits = slots_saved;
@@ -475,7 +498,7 @@ int flask_tapdance_settings_restore(const char *sub, size_t len, settings_read_c
             return 0;
         }
         K_SPINLOCK(&cfg_lock) {
-            cfg.enabled = saved.enabled != 0;
+            cfg_enabled = saved.enabled != 0;
             cfg_saved = true;
             cfg_dirty = false;
         }

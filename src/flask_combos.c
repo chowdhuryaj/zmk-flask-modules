@@ -74,14 +74,13 @@ static inline int popcount64(uint64_t v) { return __builtin_popcountll(v); }
 
 /* --- config (spinlocked: raw-HID writes race the matcher) --- */
 
+/* Scalars live outside the table on purpose: one nonzero initializer would put the
+ * whole table in .data (flash image + boot copy). The table itself is zero-init .bss. */
+static bool cfg_enabled = true;
+static uint16_t cfg_timeout_ms = TIMEOUT_DEFAULT_MS;
 static struct {
-    bool enabled;
-    uint16_t timeout_ms;
     struct flask_combo_slot slots[FLASK_COMBOS_SLOTS];
-} cfg = {
-    .enabled = true,
-    .timeout_ms = TIMEOUT_DEFAULT_MS,
-};
+} cfg;
 
 /* Derived: per-position bitmask of live slots + per-slot key counts.
  * Rebuilt on every table edit; only LIVE slots (usage set, >= 2 keys) are
@@ -106,6 +105,9 @@ static bool cfg_dirty;
  * empty entry (tombstone) for these instead of settings_delete — restore
  * marks the slot saved and defaults_commit skips it. */
 static uint64_t slots_defaulted;
+/* Indexes defaults_commit_all() already handled (retry passes must not
+ * re-seed a default the app cleared in between). Mirrors adaptive. */
+static uint64_t __maybe_unused slots_seeded;
 
 /* Prior-idle tracking (core combo.c): the last non-modifier tap, ignored
  * while a combo output is what produced it. */
@@ -227,7 +229,7 @@ static int64_t timeout_at;
 static uint16_t slot_eff_timeout(int i) {
     uint16_t t = cfg.slots[i].timeout_ms;
 
-    return t ? t : cfg.timeout_ms;
+    return t ? t : cfg_timeout_ms;
 }
 
 /* First-key candidate gates (core combo.c setup_candidates_for_first_keypress):
@@ -239,7 +241,7 @@ static int setup_candidates(uint32_t position, int64_t timestamp, uint64_t *out)
     uint8_t highest = zmk_keymap_highest_layer_active();
 
     K_SPINLOCK(&cfg_lock) {
-        if (cfg.enabled && position < ZMK_KEYMAP_LEN) {
+        if (cfg_enabled && position < ZMK_KEYMAP_LEN) {
             uint64_t hits = lookup[position];
 
             while (hits) {
@@ -293,7 +295,7 @@ static int filter_candidates(uint32_t position) {
         /* Gate on enabled here too — a capture opened while enabled must
          * die the moment the master switch goes off (bench 5: "combos
          * kept firing when off" — every window counts). */
-        if (cfg.enabled && position < ZMK_KEYMAP_LEN) {
+        if (cfg_enabled && position < ZMK_KEYMAP_LEN) {
             mask = lookup[position];
         }
     }
@@ -305,7 +307,7 @@ static int find_fully_pressed(void) {
     int found = -1;
 
     K_SPINLOCK(&cfg_lock) {
-        if (!cfg.enabled) {
+        if (!cfg_enabled) {
             K_SPINLOCK_BREAK;
         }
         for (int i = 0; i < FLASK_COMBOS_SLOTS; i++) {
@@ -358,7 +360,7 @@ static void activate_combo(int slot_idx) {
     K_SPINLOCK(&cfg_lock) {
         const struct flask_combo_slot *s = &cfg.slots[slot_idx];
 
-        enabled = cfg.enabled;
+        enabled = cfg_enabled;
         fire.action = s->action;
         fire.behavior_id = s->behavior_id;
         fire.param1 = s->param1;
@@ -458,7 +460,7 @@ static void update_timeout(void) {
     K_SPINLOCK(&cfg_lock) {
         uint64_t left = candidates;
 
-        window = cfg.timeout_ms;
+        window = cfg_timeout_ms;
         while (left) {
             int i = __builtin_ctzll(left);
 
@@ -589,13 +591,13 @@ ZMK_SUBSCRIPTION(flask_combos, zmk_keycode_state_changed);
 bool flask_combos_enabled(void) {
     bool on;
 
-    K_SPINLOCK(&cfg_lock) { on = cfg.enabled; }
+    K_SPINLOCK(&cfg_lock) { on = cfg_enabled; }
     return on;
 }
 
 void flask_combos_set_enabled(bool on) {
     K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = on;
+        cfg_enabled = on;
         cfg_dirty = true;
     }
 }
@@ -603,14 +605,14 @@ void flask_combos_set_enabled(bool on) {
 uint16_t flask_combos_timeout_ms(void) {
     uint16_t ms;
 
-    K_SPINLOCK(&cfg_lock) { ms = cfg.timeout_ms; }
+    K_SPINLOCK(&cfg_lock) { ms = cfg_timeout_ms; }
     return ms;
 }
 
 void flask_combos_set_timeout_ms(uint16_t ms) {
     ms = CLAMP(ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
     K_SPINLOCK(&cfg_lock) {
-        cfg.timeout_ms = ms;
+        cfg_timeout_ms = ms;
         cfg_dirty = true;
     }
 }
@@ -719,8 +721,8 @@ int flask_combos_save(void) {
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
-        saved.enabled = cfg.enabled ? 1 : 0;
-        saved.timeout_ms = cfg.timeout_ms;
+        saved.enabled = cfg_enabled ? 1 : 0;
+        saved.timeout_ms = cfg_timeout_ms;
         memcpy(slots, cfg.slots, sizeof(slots));
         pending = slots_dirty;
         saved_bits = slots_saved;
@@ -803,8 +805,8 @@ int flask_combos_settings_restore(const char *sub, size_t len, settings_read_cb 
             return 0;
         }
         K_SPINLOCK(&cfg_lock) {
-            cfg.enabled = saved.enabled != 0;
-            cfg.timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+            cfg_enabled = saved.enabled != 0;
+            cfg_timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
             cfg_saved = true;
             cfg_dirty = false;
         }
@@ -910,6 +912,13 @@ int flask_combos_defaults_commit(void) {
         bool fill = false;
 
         memcpy(s.pos, d->pos, FLASK_COMBOS_KEYS);
+        for (int k = 0; k < FLASK_COMBOS_KEYS; k++) {
+            if (s.pos[k] != FLASK_COMBOS_POS_NONE && s.pos[k] >= ZMK_KEYMAP_LEN) {
+                LOG_ERR("flask_combos: default %d position %d >= %d keys, skipped", i, s.pos[k],
+                        ZMK_KEYMAP_LEN);
+                goto next_default;
+            }
+        }
         if (id == 0 || id == UINT16_MAX) {
             /* SETTINGS_TABLE local ids are assigned in zmk's own settings
              * commit, which can run AFTER this handler on a fresh device —
@@ -926,7 +935,8 @@ int flask_combos_defaults_commit(void) {
             slots_defaulted |= BIT64(i);
             /* Restored entries — including explicit-empty tombstones —
              * win over the seed. */
-            fill = !(slots_saved & BIT64(i)) && slot_is_empty(&cfg.slots[i]);
+            fill = !((slots_saved | slots_seeded) & BIT64(i)) && slot_is_empty(&cfg.slots[i]);
+            slots_seeded |= BIT64(i);
             if (fill) {
                 cfg.slots[i] = s;
                 rebuild_lookup();
@@ -935,6 +945,7 @@ int flask_combos_defaults_commit(void) {
         if (fill) {
             applied++;
         }
+    next_default:;
     }
     LOG_INF("flask_combos: %d/%d compiled defaults applied (%d pending ids)", applied,
             (int)ARRAY_SIZE(combo_defaults), unresolved);

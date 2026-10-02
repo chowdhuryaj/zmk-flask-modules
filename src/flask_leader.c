@@ -51,14 +51,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* --- config (spinlocked: raw-HID writes race the matcher) --- */
 
+/* Scalars live outside the table on purpose: one nonzero initializer would put the
+ * whole table in .data (flash image + boot copy). The table itself is zero-init .bss. */
+static bool cfg_enabled = true;
+static uint16_t cfg_timeout_ms = TIMEOUT_DEFAULT_MS;
 static struct {
-    bool enabled;
-    uint16_t timeout_ms;
     struct flask_leader_slot slots[FLASK_LEADER_SLOTS];
-} cfg = {
-    .enabled = true,
-    .timeout_ms = TIMEOUT_DEFAULT_MS,
-};
+} cfg;
 
 static struct k_spinlock cfg_lock;
 
@@ -273,13 +272,13 @@ ZMK_SUBSCRIPTION(flask_leader, zmk_position_state_changed);
 bool flask_leader_enabled(void) {
     bool on;
 
-    K_SPINLOCK(&cfg_lock) { on = cfg.enabled; }
+    K_SPINLOCK(&cfg_lock) { on = cfg_enabled; }
     return on;
 }
 
 void flask_leader_set_enabled(bool on) {
     K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = on;
+        cfg_enabled = on;
         cfg_dirty = true;
     }
     if (!on && capturing) {
@@ -290,14 +289,14 @@ void flask_leader_set_enabled(bool on) {
 uint16_t flask_leader_timeout_ms(void) {
     uint16_t ms;
 
-    K_SPINLOCK(&cfg_lock) { ms = cfg.timeout_ms; }
+    K_SPINLOCK(&cfg_lock) { ms = cfg_timeout_ms; }
     return ms;
 }
 
 void flask_leader_set_timeout_ms(uint16_t ms) {
     ms = CLAMP(ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
     K_SPINLOCK(&cfg_lock) {
-        cfg.timeout_ms = ms;
+        cfg_timeout_ms = ms;
         cfg_dirty = true;
     }
 }
@@ -364,8 +363,8 @@ int flask_leader_save(void) {
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
-        saved.enabled = cfg.enabled ? 1 : 0;
-        saved.timeout_ms = cfg.timeout_ms;
+        saved.enabled = cfg_enabled ? 1 : 0;
+        saved.timeout_ms = cfg_timeout_ms;
         memcpy(slots, cfg.slots, sizeof(slots));
         pending = slots_dirty;
         saved_bits = slots_saved;
@@ -438,8 +437,8 @@ int flask_leader_settings_restore(const char *sub, size_t len, settings_read_cb 
             return 0;
         }
         K_SPINLOCK(&cfg_lock) {
-            cfg.enabled = saved.enabled != 0;
-            cfg.timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+            cfg_enabled = saved.enabled != 0;
+            cfg_timeout_ms = CLAMP(saved.timeout_ms, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
             cfg_saved = true;
             cfg_dirty = false;
         }

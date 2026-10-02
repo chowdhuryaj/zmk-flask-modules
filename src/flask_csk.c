@@ -48,12 +48,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* How many overrides can be held down at once. */
 #define CSK_MAX_ACTIVE 4
 
+/* Scalars live outside the table on purpose: one nonzero initializer would put the
+ * whole table in .data (flash image + boot copy). The table itself is zero-init .bss. */
+static bool cfg_enabled = true;
 static struct {
-    bool enabled;
     struct flask_csk_slot slots[FLASK_CSK_SLOTS];
-} cfg = {
-    .enabled = true,
-};
+} cfg;
 
 static struct k_spinlock cfg_lock;
 
@@ -81,7 +81,7 @@ static bool match_slot(uint8_t page, uint16_t id, uint32_t *repl) {
     bool hit = false;
 
     K_SPINLOCK(&cfg_lock) {
-        if (!cfg.enabled) {
+        if (!cfg_enabled) {
             K_SPINLOCK_BREAK;
         }
         for (int i = 0; i < FLASK_CSK_SLOTS; i++) {
@@ -168,13 +168,13 @@ ZMK_SUBSCRIPTION(flask_csk, zmk_keycode_state_changed);
 bool flask_csk_enabled(void) {
     bool on;
 
-    K_SPINLOCK(&cfg_lock) { on = cfg.enabled; }
+    K_SPINLOCK(&cfg_lock) { on = cfg_enabled; }
     return on;
 }
 
 void flask_csk_set_enabled(bool on) {
     K_SPINLOCK(&cfg_lock) {
-        cfg.enabled = on;
+        cfg_enabled = on;
         cfg_dirty = true;
     }
 }
@@ -221,7 +221,7 @@ int flask_csk_save(void) {
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
-        saved.enabled = cfg.enabled ? 1 : 0;
+        saved.enabled = cfg_enabled ? 1 : 0;
         memcpy(slots, cfg.slots, sizeof(slots));
         pending = slots_dirty;
         saved_bits = slots_saved;
@@ -292,7 +292,7 @@ int flask_csk_settings_restore(const char *sub, size_t len, settings_read_cb rea
             return 0;
         }
         K_SPINLOCK(&cfg_lock) {
-            cfg.enabled = saved.enabled != 0;
+            cfg_enabled = saved.enabled != 0;
             cfg_saved = true;
             cfg_dirty = false;
         }

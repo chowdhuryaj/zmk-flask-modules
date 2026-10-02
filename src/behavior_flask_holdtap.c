@@ -480,6 +480,26 @@ static bool have_captured_binding_press(uint32_t position) {
     return false;
 }
 
+/* Remove the queued ET_BINDING press for `position`, compacting so the
+ * "first ET_NONE ends the list" scans stay valid. */
+static void drop_captured_binding_press(uint32_t position) {
+    for (int i = 0; i < ZMK_BHV_HOLD_TAP_MAX_CAPTURED_EVENTS; i++) {
+        struct captured_event *ev = &captured_events[i];
+
+        if (ev->tag == ET_NONE) {
+            return;
+        }
+        if (ev->tag == ET_BINDING && ev->data.binding.pressed &&
+            ev->data.binding.event.position == position) {
+            for (int j = i; j < ZMK_BHV_HOLD_TAP_MAX_CAPTURED_EVENTS - 1; j++) {
+                captured_events[j] = captured_events[j + 1];
+            }
+            captured_events[ZMK_BHV_HOLD_TAP_MAX_CAPTURED_EVENTS - 1].tag = ET_NONE;
+            return;
+        }
+    }
+}
+
 static int capture_binding(struct zmk_behavior_binding *binding,
                            struct zmk_behavior_binding_event event, bool pressed) {
     struct captured_event capture = {
@@ -488,6 +508,11 @@ static int capture_binding(struct zmk_behavior_binding *binding,
     };
     if (capture_event(&capture) != 0) {
         LOG_ERR("fht: capture buffer full, dropping hold-tap at %d", event.position);
+        if (!pressed) {
+            /* A press that replays without its release leaves the hold
+             * (a layer, a mod) stuck: drop the queued press too. */
+            drop_captured_binding_press(event.position);
+        }
     }
     return ZMK_BEHAVIOR_OPAQUE;
 }
