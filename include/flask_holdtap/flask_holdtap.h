@@ -27,7 +27,7 @@ enum flask_holdtap_flavor {
 #define FLASK_HT_TERM_MAX_MS 1000
 #define FLASK_HT_IDLE_MAX_MS 1000 /* quick-tap and prior-idle ceiling; 0 = off */
 
-/* One slot = one key position's timing. */
+/* One slot = one key position's timing, or a virtual slot's. */
 struct flask_holdtap_timing {
     uint16_t term_ms;
     uint16_t quick_tap_ms;
@@ -36,6 +36,11 @@ struct flask_holdtap_timing {
 } __packed;
 
 uint8_t flask_holdtap_slot_count(void);
+
+/* Slot kind: *key_pos = the key position for a physical slot, 0xFF for a
+ * virtual one (past the keymap). name gets the defaults child's
+ * display-name, NUL-padded (empty when none). -EINVAL past the count. */
+int flask_holdtap_slot_info(uint8_t slot, uint8_t *key_pos, char *name, size_t name_len);
 
 /* Live value / compiled default for a slot. -EINVAL past the slot count. */
 int flask_holdtap_get(uint8_t slot, struct flask_holdtap_timing *out);

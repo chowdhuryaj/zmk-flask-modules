@@ -1,6 +1,7 @@
 # Compiled default timing for flask_holdtap slots (Flask channel 0x2A).
-# Slots are key positions; each child gives the boot timing for its
-# key-positions. Positions not listed boot at 200 ms / balanced / 0 / 0.
+# Slots are key positions plus virtual slots (a flask hold-tap node's
+# `slot`); each child gives the boot timing for the slots in its
+# key-positions. Slots not listed boot at 200 ms / balanced / 0 / 0.
 # Saved app edits win over these on boot; a slot reset (term 0) returns
 # to the value here.
 #
@@ -17,6 +18,11 @@ child-binding:
     key-positions:
       type: array
       required: true
+      description: "Slots: key positions, or virtual slots set by a node's `slot`"
+    display-name:
+      type: string
+      description: "Label for the slot(s), read over value id 0x52"
+
     tapping-term-ms:
       type: int
       default: 200

@@ -20,25 +20,36 @@
  * active/undecided/captured state and its own listener, linked (module
  * sources come first) before core's hold-tap listener and after every
  * other Flask listener — the same relative order core hold-tap has.
- * Known seam: if a CORE hold-tap is undecided and an &fht key plus another
- * key are pressed inside that window, core replays the captured events
- * from its own listener, which sits after ours, so the &fht key cannot
- * capture that third key. Same-engine rolls (&fht → &fht) behave exactly
- * like core.
+ * ONE ENGINE PER KEYMAP: if a CORE hold-tap is undecided and a flask
+ * hold-tap key plus another key land inside that window, core replays its
+ * captured events from its own listener (after ours), the third key skips
+ * us and a second flask hold-tap in that window is lost. So a keymap that
+ * binds flask hold-taps should bind NO core hold-tap (&mt, &lt, wrapped
+ * ones too); unbound core nodes cost nothing.
+ *
+ * Deviation from core: a hold-tap press that did not come through our
+ * listener (a flask_combos output, a macro step) while another flask
+ * hold-tap is undecided is QUEUED with the captured events and replayed
+ * after the decision. Core drops it ("another hold-tap is undecided"),
+ * which with flask_combos ahead of us would lose a layer-tap combo pressed
+ * right after a home-row mod.
  *
  * Keymap: &fht_x <hold-param> <tap-param>, same two-param shape as &mt;
  * each node fixes the hold/tap behaviors and positional options. Slot =
  * key position, so the configurator's per-key slider writes the slot of
- * the key it is drawing. Positions without a compiled default boot at
- * term 200 / balanced / quick-tap 0 / prior-idle 0; a flask,holdtap-defaults
- * node seeds per-position defaults (each child: key-positions + timing).
+ * the key it is drawing. A node with `slot = <n>` reads slot n instead
+ * (VIRTUAL slots past the key positions: combo and macro hold-taps get
+ * their own timing instead of borrowing a thumb's). Slots without a
+ * compiled default boot at term 200 / balanced / quick-tap 0 /
+ * prior-idle 0; a flask,holdtap-defaults node seeds per-slot defaults
+ * (each child: key-positions = slots, timing, optional display-name).
  *
  * ===================== WIRE (Flask channel 0x2A, proto v17) =============
  * Frame: 32-byte raw-HID report [cmd, channel, value_id, payload...].
  * cmd 0x07 SET / 0x08 GET / 0x09 SAVE. Unhandled frames echo with cmd
  * replaced by 0xFF. All multi-byte ints are big-endian.
  *
- *  0x01 SLOT_COUNT  RO u16  = number of key positions (Totem: 38).
+ *  0x01 SLOT_COUNT  RO u16  = key positions + virtual slots (Totem: 44).
  *  0x50 SLOT        payload-addressed, RW:
  *         [0] slot (key position)
  *         [1..2] tapping-term ms   (SET clamps 50..1000; 0 = RESET slot to
@@ -55,6 +66,10 @@
  *       fills [1..8]. Slot >= SLOT_COUNT → 0xFF.
  *  0x51 DEFAULT     payload-addressed, RO: same layout as 0x50, the
  *       compiled default for [0]; flags 0.
+ *  0x52 SLOT_INFO   payload-addressed, RO: [slot, kind (0 key / 1 virtual),
+ *       key position (= slot for kind 0, 0xFF for virtual), name ASCII
+ *       NUL-padded (bytes 3..28, the defaults child's display-name; may be
+ *       empty)].
  *  SAVE (cmd 0x09, channel 0x2A): persists every slot that differs from
  *       its default ("flask/holdtap/p<slot>") and deletes saved entries
  *       that were reset. Echo arrives after the flash writes land.
@@ -93,8 +108,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* ===================== runtime timing table ===================== */
 
-#define HT_SLOTS ZMK_KEYMAP_LEN
+/* Slot count = key positions, grown to cover the highest `slot = <n>` any
+ * flask hold-tap node names (sizeof a union of char arrays = the max). */
+#define FHT_SLOT_MEMBER(n) char s##n[DT_INST_PROP_OR(n, slot, 0) + 1];
+union fht_slot_span {
+    char keymap[ZMK_KEYMAP_LEN];
+    DT_INST_FOREACH_STATUS_OKAY(FHT_SLOT_MEMBER)
+};
+#define HT_SLOTS ((int)sizeof(union fht_slot_span))
 BUILD_ASSERT(HT_SLOTS <= 255, "slot index is one wire byte");
+#define HT_NAME_LEN 26
 
 static const struct flask_holdtap_timing builtin_default = {
     .term_ms = 200,
@@ -107,18 +130,27 @@ static struct flask_holdtap_timing live[HT_SLOTS];
 static struct flask_holdtap_timing defaults[HT_SLOTS];
 static bool dirty[HT_SLOTS];
 static bool on_flash[HT_SLOTS];
+static const char *names[HT_SLOTS];
 static struct k_spinlock cfg_lock;
 
 #if DT_HAS_COMPAT_STATUS_OKAY(flask_holdtap_defaults)
 #define FHD_NODE DT_COMPAT_GET_ANY_STATUS_OKAY(flask_holdtap_defaults)
 
 struct fhd_entry {
-    uint8_t pos;
+    uint16_t pos;
+    const char *name;
     struct flask_holdtap_timing t;
 };
 
+#define FHD_CHECK(n, prop, i)                                                                      \
+    BUILD_ASSERT(DT_PROP_BY_IDX(n, prop, i) < HT_SLOTS,                                            \
+                 "flask,holdtap-defaults slot past the slot count");
+#define FHD_CHECKS(n) DT_FOREACH_PROP_ELEM(n, key_positions, FHD_CHECK)
+DT_FOREACH_CHILD(FHD_NODE, FHD_CHECKS)
+
 #define FHD_POS(n, prop, i)                                                                        \
     {.pos = DT_PROP_BY_IDX(n, prop, i),                                                            \
+     .name = DT_PROP_OR(n, display_name, ""),                                                      \
      .t = {.term_ms = DT_PROP_OR(n, tapping_term_ms, 200),                                         \
            .quick_tap_ms = DT_PROP_OR(n, quick_tap_ms, 0),                                         \
            .prior_idle_ms = DT_PROP_OR(n, require_prior_idle_ms, 0),                               \
@@ -145,6 +177,7 @@ static int flask_holdtap_table_init(void) {
     for (int i = 0; i < (int)ARRAY_SIZE(fhd_entries); i++) {
         if (fhd_entries[i].pos < HT_SLOTS) {
             defaults[fhd_entries[i].pos] = sanitize(fhd_entries[i].t);
+            names[fhd_entries[i].pos] = fhd_entries[i].name;
         }
     }
 #endif
@@ -176,15 +209,26 @@ int flask_holdtap_default_get(uint8_t slot, struct flask_holdtap_timing *out) {
     return 0;
 }
 
+int flask_holdtap_slot_info(uint8_t slot, uint8_t *key_pos, char *name, size_t name_len) {
+    if (slot >= HT_SLOTS || key_pos == NULL || name == NULL || name_len == 0) {
+        return -EINVAL;
+    }
+    *key_pos = slot < ZMK_KEYMAP_LEN ? slot : 0xFF;
+    memset(name, 0, name_len);
+    if (names[slot] != NULL) {
+        strncpy(name, names[slot], name_len - 1);
+    }
+    return 0;
+}
+
 int flask_holdtap_set(uint8_t slot, const struct flask_holdtap_timing *in) {
-    if (slot >= HT_SLOTS || in == NULL) {
+    /* Flavor first: an invalid frame is rejected even when it asks for a
+     * reset (contract: flavor > 3 → 0xFF, nothing applied). */
+    if (slot >= HT_SLOTS || in == NULL || in->flavor > FLASK_HT_FLAVOR_MAX) {
         return -EINVAL;
     }
     struct flask_holdtap_timing t = in->term_ms == 0 ? defaults[slot] : sanitize(*in);
 
-    if (t.flavor > FLASK_HT_FLAVOR_MAX) {
-        return -EINVAL;
-    }
     K_SPINLOCK(&cfg_lock) {
         live[slot] = t;
         dirty[slot] = true;
@@ -192,8 +236,8 @@ int flask_holdtap_set(uint8_t slot, const struct flask_holdtap_timing *in) {
     return 0;
 }
 
-/* Timing for a press at `position`; positions past the keymap (combo
- * virtual positions) get the built-in default. */
+/* Timing for a press reading `position` (the node's `slot` when it has one);
+ * anything past the table gets the built-in default. */
 static struct flask_holdtap_timing timing_for(uint32_t position) {
     struct flask_holdtap_timing t = builtin_default;
 
@@ -306,6 +350,7 @@ struct behavior_hold_tap_config {
     bool hold_while_undecided_linger;
     bool retro_tap;
     bool hold_trigger_on_release;
+    int16_t slot; /* timing slot; -1 = the pressed key position */
     int32_t hold_trigger_key_positions_len;
     int32_t hold_trigger_key_positions[];
 };
@@ -341,11 +386,19 @@ enum captured_event_tag {
     ET_NONE,
     ET_POS_CHANGED,
     ET_CODE_CHANGED,
+    ET_BINDING, /* a hold-tap press/release that bypassed our listener */
+};
+
+struct captured_binding {
+    struct zmk_behavior_binding binding;
+    struct zmk_behavior_binding_event event;
+    bool pressed;
 };
 
 union captured_event_data {
     struct zmk_position_state_changed_event position;
     struct zmk_keycode_state_changed_event keycode;
+    struct captured_binding binding;
 };
 
 struct captured_event {
@@ -413,6 +466,32 @@ static bool have_captured_keydown_event(uint32_t position) {
     return false;
 }
 
+static bool have_captured_binding_press(uint32_t position) {
+    for (int i = 0; i < ZMK_BHV_HOLD_TAP_MAX_CAPTURED_EVENTS; i++) {
+        struct captured_event *ev = &captured_events[i];
+        if (ev->tag == ET_NONE) {
+            return false;
+        }
+        if (ev->tag == ET_BINDING && ev->data.binding.pressed &&
+            ev->data.binding.event.position == position) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int capture_binding(struct zmk_behavior_binding *binding,
+                           struct zmk_behavior_binding_event event, bool pressed) {
+    struct captured_event capture = {
+        .tag = ET_BINDING,
+        .data = {.binding = {.binding = *binding, .event = event, .pressed = pressed}},
+    };
+    if (capture_event(&capture) != 0) {
+        LOG_ERR("fht: capture buffer full, dropping hold-tap at %d", event.position);
+    }
+    return ZMK_BEHAVIOR_OPAQUE;
+}
+
 const struct zmk_listener zmk_listener_behavior_flask_hold_tap;
 
 /* Replay order trick: see core release_captured_events(). Replays start AT
@@ -443,6 +522,13 @@ static void release_captured_events() {
         case ET_POS_CHANGED:
             ZMK_EVENT_RAISE_AT(captured_event->data.position, behavior_flask_hold_tap);
             break;
+        case ET_BINDING: {
+            /* Copy out: the slot is free again and a hold-tap that turns
+             * undecided inside this invoke may capture into it. */
+            struct captured_binding b = captured_event->data.binding;
+            zmk_behavior_invoke_binding(&b.binding, b.event, b.pressed);
+            break;
+        }
         default:
             LOG_ERR("Unhandled captured event type");
             break;
@@ -472,7 +558,8 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
 #endif
         active_hold_taps[i].status = STATUS_UNDECIDED;
         active_hold_taps[i].config = config;
-        active_hold_taps[i].timing = timing_for(event->position);
+        active_hold_taps[i].timing =
+            timing_for(config->slot >= 0 ? (uint32_t)config->slot : event->position);
         active_hold_taps[i].param_hold = param_hold;
         active_hold_taps[i].param_tap = param_tap;
         active_hold_taps[i].timestamp = event->timestamp;
@@ -752,8 +839,9 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
     const struct behavior_hold_tap_config *cfg = dev->config;
 
     if (undecided_hold_tap != NULL) {
-        LOG_DBG("ERROR another hold-tap behavior is undecided.");
-        return ZMK_BEHAVIOR_OPAQUE;
+        /* Reached us without passing our listener (combo output, macro
+         * step): queue behind the undecided one, in order. Core drops it. */
+        return capture_binding(binding, event, true);
     }
 
     struct active_hold_tap *hold_tap =
@@ -785,6 +873,9 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
 static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
                                         struct zmk_behavior_binding_event event) {
     struct active_hold_tap *hold_tap = find_hold_tap(event.position);
+    if (hold_tap == NULL && have_captured_binding_press(event.position)) {
+        return capture_binding(binding, event, false); /* its press is still queued */
+    }
     if (hold_tap == NULL) {
         LOG_ERR("ACTIVE_HOLD_TAP_CLEANED_UP_TOO_EARLY");
         return ZMK_BEHAVIOR_OPAQUE;
@@ -973,6 +1064,7 @@ static int behavior_flask_hold_tap_init(const struct device *dev) {
         .hold_while_undecided_linger = DT_INST_PROP(n, hold_while_undecided_linger),               \
         .retro_tap = DT_INST_PROP(n, retro_tap),                                                   \
         .hold_trigger_on_release = DT_INST_PROP(n, hold_trigger_on_release),                       \
+        .slot = DT_INST_PROP_OR(n, slot, -1),                                                      \
         .hold_trigger_key_positions = DT_INST_PROP(n, hold_trigger_key_positions),                 \
         .hold_trigger_key_positions_len = DT_INST_PROP_LEN(n, hold_trigger_key_positions),         \
     };                                                                                             \

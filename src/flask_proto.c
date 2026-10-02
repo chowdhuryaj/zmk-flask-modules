@@ -189,9 +189,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * slot count 0x01 RO u16 [= key positions], slot 0x50 payload-addressed
  * [slot, term u16 BE (0 = reset to default), quick-tap u16 BE, prior-idle
  * u16 BE, flavor, flags (RO bit0 = differs from default)], compiled
- * default 0x51 RO same layout; SAVE via "flask/holdtap"). One slot per
- * KEY POSITION, read by the &fht-style zmk,behavior-flask-hold-tap nodes
- * at key-down. Core hold-tap timing is const DT, so a per-key timing
+ * default 0x51 RO same layout; slot info 0x52 RO [slot, kind 0 key /
+ * 1 virtual, key position or 0xFF, name[26]]; SAVE via "flask/holdtap").
+ * One slot per KEY POSITION plus VIRTUAL slots after them (nodes with
+ * `slot = <n>`: combo / macro hold-taps), read at key-down. Core hold-tap timing is const DT, so a per-key timing
  * slider needed its own engine. */
 #define FLASK_PROTO_VERSION 17
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
@@ -349,6 +350,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define HT_SLOT 0x50 /* payload-addressed: [slot, term u16 BE, quick u16 BE,
                       * idle u16 BE, flavor, flags] — term 0 resets */
 #define HT_DEFAULT 0x51 /* RO, same layout: the compiled default */
+#define HT_SLOT_INFO 0x52 /* RO: [slot, kind 0 key / 1 virtual, key pos or 0xFF, name[26]] */
 
 /* Leader values (channel 0x19; 0x01 = QMK leaderTimeout, slot frame at
  * 0x50 clear of QMK's u16 table 0x10-0x4D) */
@@ -938,6 +940,17 @@ static bool handle_holdtap(uint8_t cmd, uint8_t value_id, uint8_t *payload, size
         }
         ht_put(payload, &def, 0);
         return true;
+    case HT_SLOT_INFO: {
+        uint8_t key_pos;
+
+        if (cmd != CMD_GET || payload_len < 29 ||
+            flask_holdtap_slot_info(payload[0], &key_pos, (char *)&payload[3], 26) != 0) {
+            return false;
+        }
+        payload[1] = key_pos == 0xFF ? 1 : 0;
+        payload[2] = key_pos;
+        return true;
+    }
     default:
         return false;
     }

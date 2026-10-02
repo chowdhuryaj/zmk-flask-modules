@@ -2,7 +2,8 @@
 description: |
   "Flask hold-tap: core zmk,behavior-hold-tap semantics with RUNTIME timing.
   tapping-term / flavor / quick-tap / require-prior-idle come from the
-  flask_holdtap table, one slot per key position (Flask channel 0x2A).
+  flask_holdtap table, one slot per key position or the node's `slot`
+  (Flask channel 0x2A).
   Everything here is compiled per node, exactly as in core."
 
 compatible: "zmk,behavior-flask-hold-tap"
@@ -25,3 +26,10 @@ properties:
     default: []
   hold-trigger-on-release:
     type: boolean
+  slot:
+    type: int
+    description: |
+      Timing slot to read instead of the pressed key position. Use a
+      VIRTUAL slot (>= the key count) for combo / macro hold-taps so they
+      do not share a physical key's timing. The slot count grows to cover
+      the highest slot named.
