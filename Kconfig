@@ -272,6 +272,20 @@ config ZMK_BEHAVIOR_FLASK_TAPDANCE
     help
       Keymap behavior running a flask_tapdance slot: &ftd <slot>.
 
+config ZMK_FLASK_HOLDTAP
+    bool "Flask runtime hold-tap timing"
+    depends on SETTINGS
+    depends on ZMK_BEHAVIOR_HOLD_TAP
+    help
+      Hold-tap with live-editable timing (channel 0x2A): &fht-style nodes
+      (compatible zmk,behavior-flask-hold-tap) run core hold-tap logic, but
+      tapping-term / flavor / quick-tap / require-prior-idle come from a
+      runtime table with one slot per KEY POSITION, edited over the Flask
+      protocol and persisted under "flask/holdtap". A flask,holdtap-defaults
+      node seeds per-position defaults (else 200 ms balanced). Central-only
+      on splits; enable explicitly in the board .conf. Off by default, so
+      boards that do not set it are unchanged.
+
 config ZMK_FLASK_LEADER
     bool "Flask runtime leader sequences"
     depends on SETTINGS

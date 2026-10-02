@@ -96,6 +96,10 @@
 #include <flask_tapdance/flask_tapdance.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
+#include <flask_holdtap/flask_holdtap.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -180,8 +184,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * runs its own activity clock) and persisted in its own settings entry
  * "flask/rgbidle", leaving the 2.1 KB map blob's shape alone. Values under
  * the compiled idle timeout floor at it: that event is the earliest signal
- * the module gets. */
-#define FLASK_PROTO_VERSION 16
+ * the module gets.
+ * v17 (2026-10-01): runtime hold-tap timing channel 0x2A (flask_holdtap —
+ * slot count 0x01 RO u16 [= key positions], slot 0x50 payload-addressed
+ * [slot, term u16 BE (0 = reset to default), quick-tap u16 BE, prior-idle
+ * u16 BE, flavor, flags (RO bit0 = differs from default)], compiled
+ * default 0x51 RO same layout; SAVE via "flask/holdtap"). One slot per
+ * KEY POSITION, read by the &fht-style zmk,behavior-flask-hold-tap nodes
+ * at key-down. Core hold-tap timing is const DT, so a per-key timing
+ * slider needed its own engine. */
+#define FLASK_PROTO_VERSION 17
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -210,6 +222,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_BALLSWAP 0x27 /* ZMK-line: flask_ballswap (v11); 0x1C-0x1F stay QMK-only */
 #define CH_TAPDANCE 0x28 /* ZMK-line: flask_tapdance (v14) */
 #define CH_SCROLLSCALE 0x29 /* ZMK-line: flask_scrollscale (v15) */
+#define CH_HOLDTAP 0x2A /* ZMK-line: flask_holdtap (v17) */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -330,6 +343,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_STEP 0x50 /* payload-addressed: [slot, tap, action, behavior u16 BE,
                       * p1 u32 BE, p2 u32 BE] */
 #define TD_CFG 0x51  /* payload-addressed: [slot, term u16 BE (0 = default 200)] */
+
+/* Hold-tap timing values (channel 0x2A, ZMK line). Slot = key position. */
+#define HT_SLOT_COUNT 0x01 /* RO */
+#define HT_SLOT 0x50 /* payload-addressed: [slot, term u16 BE, quick u16 BE,
+                      * idle u16 BE, flavor, flags] — term 0 resets */
+#define HT_DEFAULT 0x51 /* RO, same layout: the compiled default */
 
 /* Leader values (channel 0x19; 0x01 = QMK leaderTimeout, slot frame at
  * 0x50 clear of QMK's u16 table 0x10-0x4D) */
@@ -868,6 +887,62 @@ static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, siz
     }
 }
 #endif /* CONFIG_ZMK_FLASK_TAPDANCE */
+
+#if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
+static void ht_put(uint8_t *payload, const struct flask_holdtap_timing *t, uint8_t flags) {
+    payload[1] = t->term_ms >> 8;
+    payload[2] = t->term_ms;
+    payload[3] = t->quick_tap_ms >> 8;
+    payload[4] = t->quick_tap_ms;
+    payload[5] = t->prior_idle_ms >> 8;
+    payload[6] = t->prior_idle_ms;
+    payload[7] = t->flavor;
+    payload[8] = flags;
+}
+
+/* Channel 0x2A — slot frame [slot, term, quick, idle (u16 BE each),
+ * flavor, flags]. Slot byte echoes untouched; the rest is the APPLIED
+ * value. */
+static bool handle_holdtap(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
+    struct flask_holdtap_timing t, def;
+
+    switch (value_id) {
+    case HT_SLOT_COUNT:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_holdtap_slot_count());
+        return true;
+    case HT_SLOT:
+        if (payload_len < 9) {
+            return false;
+        }
+        if (cmd == CMD_SET) {
+            t.term_ms = ((uint16_t)payload[1] << 8) | payload[2];
+            t.quick_tap_ms = ((uint16_t)payload[3] << 8) | payload[4];
+            t.prior_idle_ms = ((uint16_t)payload[5] << 8) | payload[6];
+            t.flavor = payload[7];
+            if (flask_holdtap_set(payload[0], &t) != 0) {
+                return false;
+            }
+        }
+        if (flask_holdtap_get(payload[0], &t) != 0 ||
+            flask_holdtap_default_get(payload[0], &def) != 0) {
+            return false;
+        }
+        ht_put(payload, &t, memcmp(&t, &def, sizeof(t)) != 0 ? 0x01 : 0x00);
+        return true;
+    case HT_DEFAULT:
+        if (cmd != CMD_GET || payload_len < 9 || flask_holdtap_default_get(payload[0], &def) != 0) {
+            return false;
+        }
+        ht_put(payload, &def, 0);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_HOLDTAP */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_GESTURES)
 /* Channel 0x11 — the slot value is a PAYLOAD-ADDRESSED byte frame:
@@ -1628,6 +1703,10 @@ static bool handle_save(uint8_t channel) {
     case CH_TAPDANCE:
         return flask_tapdance_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
+    case CH_HOLDTAP:
+        return flask_holdtap_save() == 0;
+#endif
     default:
         return false;
     }
@@ -1756,6 +1835,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
         case CH_TAPDANCE:
             ok = handle_tapdance(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
+        case CH_HOLDTAP:
+            ok = handle_holdtap(cmd, value_id, payload, sizeof(reply) - 3);
             break;
 #endif
         default:
@@ -1982,6 +2066,16 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         if (settings_name_steq(name, "tapdance", &sub)) {
             return flask_tapdance_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
                                                    cb_arg);
+        }
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_HOLDTAP)
+    {
+        const char *sub = NULL;
+
+        if (settings_name_steq(name, "holdtap", &sub)) {
+            return flask_holdtap_settings_restore(sub && sub[0] ? sub : NULL, len, read_cb,
+                                                  cb_arg);
         }
     }
 #endif

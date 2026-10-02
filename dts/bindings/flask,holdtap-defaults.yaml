@@ -1,0 +1,36 @@
+# Compiled default timing for flask_holdtap slots (Flask channel 0x2A).
+# Slots are key positions; each child gives the boot timing for its
+# key-positions. Positions not listed boot at 200 ms / balanced / 0 / 0.
+# Saved app edits win over these on boot; a slot reset (term 0) returns
+# to the value here.
+#
+# SPDX-License-Identifier: MIT
+
+description: "Default per-position timing for the flask_holdtap engine"
+
+compatible: "flask,holdtap-defaults"
+
+child-binding:
+  description: "Timing for a group of key positions"
+
+  properties:
+    key-positions:
+      type: array
+      required: true
+    tapping-term-ms:
+      type: int
+      default: 200
+    quick-tap-ms:
+      type: int
+      default: 0
+    require-prior-idle-ms:
+      type: int
+      default: 0
+    flavor:
+      type: string
+      default: "balanced"
+      enum:
+        - "hold-preferred"
+        - "balanced"
+        - "tap-preferred"
+        - "tap-unless-interrupted"

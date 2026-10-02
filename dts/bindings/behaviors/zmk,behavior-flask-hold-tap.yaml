@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "Flask hold-tap: core zmk,behavior-hold-tap semantics with RUNTIME timing.
+  tapping-term / flavor / quick-tap / require-prior-idle come from the
+  flask_holdtap table, one slot per key position (Flask channel 0x2A).
+  Everything here is compiled per node, exactly as in core."
+
+compatible: "zmk,behavior-flask-hold-tap"
+
+include: two_param.yaml
+
+properties:
+  bindings:
+    type: phandles
+    required: true
+  hold-while-undecided:
+    type: boolean
+  hold-while-undecided-linger:
+    type: boolean
+  retro-tap:
+    type: boolean
+  hold-trigger-key-positions:
+    type: array
+    required: false
+    default: []
+  hold-trigger-on-release:
+    type: boolean
