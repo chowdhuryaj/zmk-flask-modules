@@ -348,6 +348,18 @@ config ZMK_FLASK_HOLDTAP
       on splits; enable explicitly in the board .conf. Off by default, so
       boards that do not set it are unchanged.
 
+config ZMK_FLASK_LAYER_AUTOEXIT
+    bool "Flask: latched layers exit on a transparent key"
+    default n
+    help
+      A layer that is on with no key holding it (&tog, &to, a smart_layer
+      tap) turns off when a key that is &trans on it is pressed; the press
+      falls through as &trans would. Layers held by a key or combo (&mo,
+      layer-tap holds, conditional layers) and locked layers (&num_word)
+      never exit. Bindings are read live, so Studio edits apply. The unlatch
+      key (&tog L / smart_layer L under a &trans on L) still toggles off.
+      Central-only on splits.
+
 config ZMK_FLASK_LEADER
     bool "Flask runtime leader sequences"
     depends on SETTINGS

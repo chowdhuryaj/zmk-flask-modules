@@ -15,6 +15,10 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_AUTOSCROLL app PRIVATE src/behavior_flask_autoscroll.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_RGB app PRIVATE src/behavior_flask_rgb.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_PROTO app PRIVATE src/flask_proto.c)
+  # Raw-key half of layer autoexit: BEFORE combos so it sees combo keys the
+  # combo engine swallows (a combo-held layer must count as held). Its
+  # press half links after flask_holdtap below.
+  target_sources_ifdef(CONFIG_ZMK_FLASK_LAYER_AUTOEXIT app PRIVATE src/flask_layer_autoexit.c)
   # After flask_proto.c on purpose: event subscriptions run in link order,
   # and the HUD keystate listener (flask_proto.c) must see raw position
   # events BEFORE flask_combos captures them.
@@ -45,6 +49,10 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   # own), and this port must hold the same relative position — after
   # combos/leader/automouse capture, before core hold-tap and the keymap.
   target_sources_ifdef(CONFIG_ZMK_FLASK_HOLDTAP app PRIVATE src/behavior_flask_holdtap.c)
+  # After flask_holdtap, before core hold-tap and the keymap: the autoexit
+  # decision sees presses as the keymap will (combo keys swallowed,
+  # hold-tap captures replayed after the decision).
+  target_sources_ifdef(CONFIG_ZMK_FLASK_LAYER_AUTOEXIT app PRIVATE src/flask_layer_autoexit_press.c)
   if (CONFIG_ZMK_FLASK_RGB AND CONFIG_ZMK_SPLIT_BLE)
     target_sources(app PRIVATE src/flask_rgb_split_central.c)
   endif()
