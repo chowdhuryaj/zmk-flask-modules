@@ -29,6 +29,16 @@
  * EQUAL its set: Shift+, and Ctrl+Shift+, are separate slots. Only the
  * trigger's mods (both sides) are masked. Frame grows to [.., mods, flags].
  *
+ * OS-aware shortcuts (OSK_CAPS 0x05 = 1): flags bits 1-2 = OS condition
+ * (0 any, 1 Mac only, 2 PC only — against the zmk-switch-layout index,
+ * OS_MODE 0x04; module absent = 0xFFFF and conditioned slots never fire),
+ * bit3 wildcard (any non-modifier key; trigger must be a SUBSET of the
+ * held set, the key is kept and only the replacement's mod bits apply;
+ * specific slots win), bit4 count keymap mods (the event's implicit mods,
+ * e.g. &kp LG(C), join the held set; matched implicit trigger mods are
+ * dropped from the output). Only EXPLICIT trigger mods are ever masked.
+ * A wildcard slot is live whenever bit3 is set (usages may be 0).
+ *
  * Central-only on splits: the central owns the HID endpoint and sees
  * every keycode event.
  *
@@ -47,10 +57,22 @@
 
 #define FLASK_CSK_TRIGGER_SHIFT 0x02 /* what mods == 0 means */
 #define FLASK_CSK_FLAG_KEEP 0x01
+#define FLASK_CSK_FLAG_OS_MASK 0x06 /* 0 any, OS_MAC, OS_PC; both bits = invalid */
+#define FLASK_CSK_FLAG_OS_MAC 0x02
+#define FLASK_CSK_FLAG_OS_PC 0x04
+#define FLASK_CSK_FLAG_WILD 0x08
+#define FLASK_CSK_FLAG_IMPLICIT 0x10
+#define FLASK_CSK_FLAGS_VALID 0x1F
+
+/* zmk-switch-layout index values (Totem keymap OS_PC / OS_MAC). */
+#define FLASK_CSK_OS_PC 0
+#define FLASK_CSK_OS_MAC 1
+#define FLASK_CSK_OS_NONE 0xFFFF /* switch-layout module not built in */
 
 /* One custom shift pair (ZMK keymap encoding). A slot is live when both
  * base and shifted are nonzero. mods = trigger set (0 reads as Shift),
- * flags = FLASK_CSK_FLAG_*. slot_set refuses mods bits 4-7 / unknown flags. */
+ * flags = FLASK_CSK_FLAG_*. slot_set refuses mods bits 4-7, flags bits 5-7
+ * and OS condition 3. */
 struct flask_csk_slot {
     uint32_t base;
     uint32_t shifted;
@@ -62,6 +84,9 @@ bool flask_csk_enabled(void);
 void flask_csk_set_enabled(bool on);
 
 uint8_t flask_csk_slot_count(void);
+
+/* Current OS mode (zmk-switch-layout index) or FLASK_CSK_OS_NONE. */
+uint16_t flask_csk_os_mode(void);
 
 int flask_csk_slot_get(uint8_t idx, struct flask_csk_slot *out);
 int flask_csk_slot_set(uint8_t idx, const struct flask_csk_slot *in);

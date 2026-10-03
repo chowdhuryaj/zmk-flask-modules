@@ -360,6 +360,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CSK_ENABLED 0x01
 #define CSK_SLOT_COUNT 0x02 /* RO */
 #define CSK_MORPH_CAPS 0x03 /* RO u16: 1 = slot frame carries mods + flags */
+#define CSK_OS_MODE 0x04 /* RO u16: zmk-switch-layout index (0 PC, 1 Mac), 0xFFFF = module absent */
+#define CSK_OSK_CAPS 0x05 /* RO u16: 1 = flags bits 1-4 (OS condition, wildcard, keymap mods) */
 #define CSK_SLOT 0x50 /* payload-addressed: [slot, base u32 BE, shifted u32 BE, mods, flags] */
 
 /* Tap dance values (channel 0x28, ZMK line — Vial serves QMK tap dance
@@ -806,10 +808,17 @@ static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t p
         wr_u16(payload, flask_csk_slot_count());
         return true;
     case CSK_MORPH_CAPS:
+    case CSK_OSK_CAPS:
         if (cmd != CMD_GET) {
             return false;
         }
         wr_u16(payload, 1);
+        return true;
+    case CSK_OS_MODE:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, flask_csk_os_mode());
         return true;
     case CSK_SLOT: {
         if (payload_len < 1 + 4 + 4 + 2) {

@@ -226,7 +226,10 @@ config ZMK_FLASK_CSK
       0x16), generalised to mod-morph: while a slot's exact modifier set
       (any of Ctrl/Shift/Alt/GUI, either side) is held, a key whose base
       usage matches sends the slot's replacement instead, with those
-      modifiers masked out of the report unless the slot keeps them. Pure keycode-event hook — no per-key
+      modifiers masked out of the report unless the slot keeps them. Slots can
+      also be OS-conditioned (zmk-switch-layout index: Mac/PC, read through
+      its public zmk_switch_layout_get() when that module is built in),
+      wildcards (any key) and count keymap mods (&kp LG(C)). Pure keycode-event hook — no per-key
       mod-morph nodes. Central-only on splits (no DT node — enable
       explicitly in the board .conf).
 

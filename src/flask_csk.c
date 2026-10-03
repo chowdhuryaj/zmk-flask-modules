@@ -17,6 +17,14 @@
  * the replacement, keeping HID press/release paired even when the mods
  * lift or change first (state at press time decides).
  *
+ * OS-aware slots (flags bits 1-4, see flask_csk.h): an OS condition is
+ * checked at press time only, so toggling the OS mid-hold cannot strand a
+ * key (release goes through the active table). Specific slots are tried
+ * before wildcards. Only trigger mods that are EXPLICITLY held are masked;
+ * implicit trigger mods (bit4, e.g. &kp LG(V)) are dropped from the
+ * event's own implicit set instead, so an implicit-only match never
+ * touches the masked register.
+ *
  * The masked-modifier register is a single global (mod-morph shares this
  * limit): it holds the union of the live overrides' masks, written only
  * when that union changes and cleared when it empties. A Shift-only table
@@ -43,6 +51,13 @@
 #include <zmk/keys.h>
 
 #include <flask_csk/flask_csk.h>
+
+/* OS mode comes from mctechnology17/zmk-switch-layout's public state API
+ * (the index &sw_layout toggles and persists). Built without that module,
+ * the mode reads FLASK_CSK_OS_NONE and OS-conditioned slots never fire. */
+#if IS_ENABLED(CONFIG_ZMK_SWITCH_LAYOUT_STATE)
+#include <zmk_switch_layout/state.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -91,6 +106,39 @@ static uint8_t slot_trigger(const struct flask_csk_slot *s) {
     return s->mods ? s->mods : FLASK_CSK_TRIGGER_SHIFT;
 }
 
+static bool slot_valid(const struct flask_csk_slot *s) {
+    return !(s->mods & 0xF0) && !(s->flags & ~FLASK_CSK_FLAGS_VALID) &&
+           (s->flags & FLASK_CSK_FLAG_OS_MASK) != FLASK_CSK_FLAG_OS_MASK;
+}
+
+/* A wildcard ignores both usages, so it is live (and saved) on its flag alone. */
+static bool slot_empty(const struct flask_csk_slot *s) {
+    return s->base == 0 && s->shifted == 0 && !(s->flags & FLASK_CSK_FLAG_WILD);
+}
+
+static bool slot_live(const struct flask_csk_slot *s) {
+    return (s->flags & FLASK_CSK_FLAG_WILD) || (s->base != 0 && s->shifted != 0);
+}
+
+static bool os_ok(uint8_t flags, uint16_t os) {
+    switch (flags & FLASK_CSK_FLAG_OS_MASK) {
+    case FLASK_CSK_FLAG_OS_MAC:
+        return os == FLASK_CSK_OS_MAC;
+    case FLASK_CSK_FLAG_OS_PC:
+        return os == FLASK_CSK_OS_PC;
+    default:
+        return true;
+    }
+}
+
+uint16_t flask_csk_os_mode(void) {
+#if IS_ENABLED(CONFIG_ZMK_SWITCH_LAYOUT_STATE)
+    return zmk_switch_layout_get();
+#else
+    return FLASK_CSK_OS_NONE;
+#endif
+}
+
 static zmk_mod_flags_t active_mask(void) {
     zmk_mod_flags_t m = 0;
 
@@ -115,30 +163,66 @@ static void update_mask(zmk_mod_flags_t before) {
     }
 }
 
-static bool match_slot(uint8_t page, uint16_t id, uint8_t held, uint32_t *repl,
-                       zmk_mod_flags_t *mask) {
-    bool hit = false;
+/* expl/impl = folded explicit / event-implicit mods. Pass 0 = specific
+ * slots (exact set), pass 1 = wildcards (trigger subset of held). */
+static bool match_slot(const struct zmk_keycode_state_changed *ev, uint8_t expl, uint8_t impl,
+                       uint32_t *repl, zmk_mod_flags_t *mask) {
+    uint8_t page = (uint8_t)ev->usage_page;
+    uint16_t id = (uint16_t)ev->keycode;
+    uint16_t os = flask_csk_os_mode();
+    struct flask_csk_slot hit;
+    bool found = false;
 
     K_SPINLOCK(&cfg_lock) {
         if (!cfg_enabled) {
             K_SPINLOCK_BREAK;
         }
-        for (int i = 0; i < FLASK_CSK_SLOTS; i++) {
-            const struct flask_csk_slot *s = &cfg.slots[i];
+        for (int pass = 0; pass < 2 && !found; pass++) {
+            for (int i = 0; i < FLASK_CSK_SLOTS; i++) {
+                const struct flask_csk_slot *s = &cfg.slots[i];
+                bool wild = (s->flags & FLASK_CSK_FLAG_WILD) != 0;
+                uint8_t trig = slot_trigger(s);
+                uint8_t held = expl | ((s->flags & FLASK_CSK_FLAG_IMPLICIT) ? impl : 0);
 
-            if (s->base == 0 || s->shifted == 0) {
-                continue;
-            }
-            if (slot_trigger(s) == held && ENC_PAGE(s->base) == page &&
-                ENC_ID(s->base) == id) {
-                *repl = s->shifted;
-                *mask = (s->flags & FLASK_CSK_FLAG_KEEP) ? 0 : CSK_SIDES(held);
-                hit = true;
-                break;
+                if (wild != pass || !slot_live(s) || !os_ok(s->flags, os)) {
+                    continue;
+                }
+                if (wild ? (trig & held) == trig
+                         : (trig == held && ENC_PAGE(s->base) == page && ENC_ID(s->base) == id)) {
+                    hit = *s;
+                    found = true;
+                    break;
+                }
             }
         }
     }
-    return hit;
+    if (!found) {
+        return false;
+    }
+
+    uint8_t trig = slot_trigger(&hit);
+    bool keep = (hit.flags & FLASK_CSK_FLAG_KEEP) != 0;
+    bool counts_impl = (hit.flags & FLASK_CSK_FLAG_IMPLICIT) != 0;
+
+    /* Only explicitly held trigger mods sit in the register; for old slots
+     * trig == expl, so this is the old CSK_SIDES(held). */
+    *mask = keep ? 0 : CSK_SIDES(trig & expl);
+    if (hit.flags & FLASK_CSK_FLAG_WILD) {
+        /* Same key; implicit trigger mods dropped (unless keep), replacement mods added. */
+        uint8_t strip = (counts_impl && !keep) ? CSK_SIDES(trig) : 0;
+        uint8_t mods = (ev->implicit_modifiers & ~strip) | ENC_MODS(hit.shifted);
+
+        *repl = ((uint32_t)mods << 24) | ((uint32_t)page << 16) | id;
+    } else {
+        /* Exact match: the event's implicit mods are all trigger mods
+         * (bit4) or not counted (old behaviour: replaced). keep + bit4
+         * keeps them, like explicit trigger mods under keep. */
+        *repl = hit.shifted;
+        if (counts_impl && keep) {
+            *repl |= (uint32_t)ev->implicit_modifiers << 24;
+        }
+    }
+    return true;
 }
 
 static void apply_replacement(struct zmk_keycode_state_changed *ev, uint32_t repl) {
@@ -155,13 +239,15 @@ static int csk_listener(const zmk_event_t *eh) {
     }
 
     if (ev->state) {
-        /* Press: only when some modifier is explicitly held. */
-        uint8_t held = CSK_FOLD(zmk_hid_get_explicit_mods());
+        /* Press: only when some modifier is held (explicitly, or implicitly
+         * on the event for bit4 slots). */
+        uint8_t expl = CSK_FOLD(zmk_hid_get_explicit_mods());
+        uint8_t impl = CSK_FOLD(ev->implicit_modifiers);
         uint32_t repl;
         zmk_mod_flags_t mask;
 
-        if (!held || is_mod(ev->usage_page, ev->keycode) ||
-            !match_slot(ev->usage_page, (uint16_t)ev->keycode, held, &repl, &mask)) {
+        if (!(expl | impl) || is_mod(ev->usage_page, ev->keycode) ||
+            !match_slot(ev, expl, impl, &repl, &mask)) {
             return ZMK_EV_EVENT_BUBBLE;
         }
 
@@ -238,7 +324,7 @@ int flask_csk_slot_set(uint8_t idx, const struct flask_csk_slot *in) {
         return -EINVAL;
     }
 
-    if ((in->mods & 0xF0) || (in->flags & ~FLASK_CSK_FLAG_KEEP)) {
+    if (!slot_valid(in)) {
         return -EINVAL;
     }
 
@@ -296,7 +382,7 @@ int flask_csk_save(void) {
 
     while (pending) {
         int i = __builtin_ctz(pending);
-        bool empty = slots[i].base == 0 && slots[i].shifted == 0;
+        bool empty = slot_empty(&slots[i]);
         bool on_flash = (saved_bits & BIT(i)) != 0;
         char key[20];
         int err = 0;
@@ -371,7 +457,7 @@ int flask_csk_settings_restore(const char *sub, size_t len, settings_read_cb rea
         if (read_cb(cb_arg, &s, len) < 0) {
             return -EIO;
         }
-        if ((s.mods & 0xF0) || (s.flags & ~FLASK_CSK_FLAG_KEEP)) {
+        if (!slot_valid(&s)) {
             LOG_WRN("flask/csk/%s ignored (bad mods/flags)", sub);
             return 0;
         }
