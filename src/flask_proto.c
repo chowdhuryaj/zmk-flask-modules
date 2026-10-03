@@ -217,7 +217,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * shift 0x16 becomes full mod-morph — morph caps 0x03 RO (= 1) and the
  * slot frame 0x50 grows to [slot, base u32 BE, repl u32 BE, trigger mods
  * (bit0 Ctrl, bit1 Shift, bit2 Alt, bit3 GUI; 0 on SET = Shift), flags
- * (bit0 keep)]; high mod bits or unknown flags -> 0xFF. */
+ * (bit0 keep)]; high mod bits or unknown flags -> 0xFF.
+ * Later on v18, no bump (feature-detected, old images echo 0xFF): meta
+ * to-layer 0x05, SET-only [layer ID u16 BE] = `&to` that layer (all others
+ * off), run on the system workqueue. An ID, not an index: it matches the
+ * keymap's &to cells and survives Studio layer removal/reorder (the active
+ * layer GET 0x02 answers an index). Unknown or Studio-removed ID -> 0xFF.
+ * Host tools use it to put the board back on a layer (Neru on-exit). */
 #define FLASK_PROTO_VERSION 18
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
@@ -300,6 +306,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
                                * (crash forensics: SOFTWARE/CPU_LOCKUP/WATCHDOG
                                * after an unexplained reboot); answers
                                * unhandled without CONFIG_HWINFO */
+#define META_TO_LAYER 0x05 /* SET-only: [layer ID u16 BE] = &to that layer */
 
 /* Dragscroll values — same wire vocabulary as the QMK families
  * (flaskproto.js V.dragDivH/dragDivV/dragInverted/dragInterval/
@@ -490,9 +497,33 @@ static int flask_reset_cause_init(void) {
 SYS_INIT(flask_reset_cause_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 #endif
 
+/* SET active layer runs where &to runs: keymap + layer listeners (autoexit,
+ * automouse) assume the system workqueue, raw HID arrives on the USB one. */
+static zmk_keymap_layer_id_t meta_to_layer;
+
+static void meta_to_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    zmk_keymap_layer_to(meta_to_layer, false);
+}
+
+static K_WORK_DEFINE(meta_to_work, meta_to_work_handler);
+
 static bool handle_meta(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    if (cmd == CMD_SET && value_id == META_TO_LAYER) {
+        uint16_t id = rd_u16(payload);
+
+        /* Only an ID still in the layer order (Studio can remove layers). */
+        for (int idx = 0; id < ZMK_KEYMAP_LAYERS_LEN && idx < ZMK_KEYMAP_LAYERS_LEN; idx++) {
+            if (zmk_keymap_layer_index_to_id(idx) == id) {
+                meta_to_layer = id;
+                k_work_submit(&meta_to_work);
+                return true;
+            }
+        }
+        return false;
+    }
     if (cmd != CMD_GET) {
-        return false; /* meta is read-only */
+        return false; /* everything else in meta is read-only */
     }
     switch (value_id) {
     case META_PROTOCOL_VERSION:
