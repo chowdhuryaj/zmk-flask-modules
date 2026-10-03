@@ -356,9 +356,11 @@ config ZMK_FLASK_LAYER_AUTOEXIT
       tap) turns off when a key that is &trans on it is pressed; the press
       falls through as &trans would. Layers held by a key or combo (&mo,
       layer-tap holds, conditional layers) and locked layers (&num_word)
-      never exit. Bindings are read live, so Studio edits apply. The unlatch
-      key (&tog L / smart_layer L under a &trans on L) still toggles off.
-      Central-only on splits.
+      never exit, and a latched layer counts as held while its own layer key
+      or combo is down. A press that falls through to a modifier, layer or
+      hold-tap key (incl. mod-taps) never exits. Bindings are read live, so
+      Studio edits apply. The unlatch key (&tog L / smart_layer L under a
+      &trans on L) still toggles off. Central-only on splits.
 
 config ZMK_FLASK_LEADER
     bool "Flask runtime leader sequences"

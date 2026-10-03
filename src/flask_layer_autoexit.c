@@ -11,6 +11,17 @@
  * next key) does. Locked layers (zmk-auto-layer's &num_word activates
  * with locking=true) are left to their owner.
  *
+ * Exempt presses: only a press that falls through to something that types
+ * or acts exits. If the binding it falls to is a modifier (&kp / sticky of
+ * a pure modifier usage) or a layer / hold-tap key (&mo &tog &to &sl &skl,
+ * any core or flask hold-tap incl. &lt / mod-taps / smart_layer / &flt_*,
+ * &num_word), nothing exits.
+ *
+ * Re-held latched layer: a latched layer L whose own layer key (&mo L,
+ * &lt L, smart_layer L, a layer combo for L) is pressed while L is already
+ * on gets no layer event, so that key is added to L's holders here and L
+ * counts as HELD until it comes up.
+ *
  * Two listeners, two link positions (event subscriptions run in link
  * order, see CMakeLists.txt):
  *  - this file links BEFORE flask_combos: it must see raw key positions,
@@ -43,6 +54,7 @@
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/behavior.h>
 #include <zmk/keymap.h>
+#include <zmk/keys.h>
 #include <zmk/matrix.h>
 
 #define WORDS DIV_ROUND_UP(ZMK_KEYMAP_LEN, 32)
@@ -59,22 +71,92 @@ static bool held(zmk_keymap_layer_id_t layer) {
     return false;
 }
 
-/* By name: Studio-set bindings carry the registry's name string, compiled
- * ones the DEVICE_DT_NAME literal. No &trans node compiled -> nothing can be
+/* Behaviors are matched by device name: Studio-set bindings carry the
+ * registry's name string, compiled ones the DEVICE_DT_NAME literal, and
+ * both are the same device->name. No &trans node compiled -> nothing can be
  * &trans (Studio only assigns compiled behaviors) -> feature inert. */
+#define AE_NAME_IS(node) || strcmp(n, DEVICE_DT_NAME(node)) == 0
+
 static bool is_trans(const struct zmk_behavior_binding *b) {
-#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_transparent)
-    return b && b->behavior_dev &&
-           strcmp(b->behavior_dev, DEVICE_DT_NAME(DT_INST(0, zmk_behavior_transparent))) == 0;
-#else
-    return false;
-#endif
+    const char *n = b ? b->behavior_dev : NULL;
+
+    return n && (false DT_FOREACH_STATUS_OKAY(zmk_behavior_transparent, AE_NAME_IS));
+}
+
+static bool is_key_press(const char *n) {
+    return false DT_FOREACH_STATUS_OKAY(zmk_behavior_key_press, AE_NAME_IS);
+}
+
+/* &sk/&skm wrap &kp (param1 = usage), &sl/&skl wrap &mo (param1 = layer). */
+static bool is_sticky(const char *n) {
+    return false DT_FOREACH_STATUS_OKAY(zmk_behavior_sticky_key, AE_NAME_IS);
+}
+
+/* Layer keys and every hold-tap (core and flask: &lt, mod-taps,
+ * smart_layer, &fht_*, &flt_*). */
+static bool is_layer_or_holdtap(const char *n) {
+    /* clang-format off */
+    return false
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_momentary_layer, AE_NAME_IS)
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_toggle_layer, AE_NAME_IS)
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_to_layer, AE_NAME_IS)
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_auto_layer, AE_NAME_IS)
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_hold_tap, AE_NAME_IS)
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_flask_hold_tap, AE_NAME_IS);
+    /* clang-format on */
+}
+
+static bool is_mod_usage(uint32_t usage) {
+    uint8_t page = ZMK_HID_USAGE_PAGE(usage);
+
+    return is_mod(page ? page : HID_USAGE_KEY, ZMK_HID_USAGE_ID(usage));
+}
+
+/* A press falling to this binding does not exit latched layers. */
+static bool is_exempt(const struct zmk_behavior_binding *b) {
+    const char *n = b ? b->behavior_dev : NULL;
+
+    if (!n) {
+        return false;
+    }
+    if (is_layer_or_holdtap(n)) {
+        return true;
+    }
+    if (is_sticky(n)) {
+        return b->param1 < ZMK_KEYMAP_LAYERS_LEN || is_mod_usage(b->param1);
+    }
+    return is_key_press(n) && is_mod_usage(b->param1);
+}
+
+/* Press at `position` resolved to `b`: if b is a layer / hold-tap / sticky
+ * key whose param1 names a layer that is already on, that layer counts as
+ * held while the key stays down (no layer event fires for an already-on
+ * layer, so the holders snapshot never saw this key). Only for keys still
+ * physically down: a hold-tap replay can arrive after the release, and a
+ * bit set then would never clear. Also called by flask_combos for a combo's
+ * behavior output (position = first combo key).
+ * ponytail: param1 as the layer; the hold half of a mod-tap carries a usage
+ * (>= 0x70000) so it never matches. */
+void flask_layer_autoexit_hold(const struct zmk_behavior_binding *b, uint32_t position) {
+    if (!b || !b->behavior_dev || position >= ZMK_KEYMAP_LEN ||
+        b->param1 >= ZMK_KEYMAP_LAYERS_LEN ||
+        !(is_layer_or_holdtap(b->behavior_dev) || is_sticky(b->behavior_dev))) {
+        return;
+    }
+    const zmk_keymap_layer_id_t l = b->param1;
+    const uint32_t bit = BIT(position % 32);
+    const int w = position / 32;
+
+    if (l != zmk_keymap_layer_default() && zmk_keymap_layer_active(l) && (down[w] & bit)) {
+        holders[l][w] |= bit;
+    }
 }
 
 /* Called from flask_layer_autoexit_press.c on every key press that reaches
  * the keymap. Walks active layers top-down: each latched layer whose
  * binding here is &trans is marked for exit; the walk stops at the first
- * non-&trans binding, held or locked layer, or the default layer. */
+ * non-&trans binding, held or locked layer, or the default layer. The
+ * marked layers exit unless the binding the press falls to is exempt. */
 void flask_layer_autoexit_press(uint32_t position) {
     if (position >= ZMK_KEYMAP_LEN) {
         return;
@@ -107,18 +189,10 @@ void flask_layer_autoexit_press(uint32_t position) {
             break;
         }
     }
-    if (!exits) {
-        return;
-    }
-    /* Toggle-back guard: the classic unlatch key (&tog L, or smart_layer L L,
-     * under a &trans on L) would otherwise exit L here and then toggle it
-     * straight back on. Skip the exit when the binding the press falls to
-     * names an exiting layer in either param.
-     * ponytail: param match, not behavior match; a small non-layer param
-     * equal to an exiting layer id (&mkp MB1 vs layer 1, &bt BT_SEL n)
-     * only costs a missed exit. Match behavior names if that bites. */
-    if (resolver && ((resolver->param1 < 32 && (exits & BIT(resolver->param1))) ||
-                     (resolver->param2 < 32 && (exits & BIT(resolver->param2))))) {
+    /* Exempt also covers the unlatch key (&tog L / smart_layer L L under a
+     * &trans on L): it must not exit L and then toggle it straight back on. */
+    if (is_exempt(resolver)) {
+        flask_layer_autoexit_hold(resolver, position);
         return;
     }
     for (int id = 0; id < ZMK_KEYMAP_LAYERS_LEN; id++) {

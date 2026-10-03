@@ -59,6 +59,11 @@
 #include <flask_macros/flask_macros.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LAYER_AUTOEXIT)
+void flask_layer_autoexit_hold(const struct zmk_behavior_binding *b,
+                               uint32_t position); /* flask_layer_autoexit.c */
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define TIMEOUT_MIN_MS 10
@@ -210,6 +215,12 @@ static void fire_output(const struct active_rt *a, bool pressed, int64_t timesta
             .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
 #endif
         };
+#if IS_ENABLED(CONFIG_ZMK_FLASK_LAYER_AUTOEXIT)
+        if (pressed) {
+            /* A layer combo for an already-latched layer holds it. */
+            flask_layer_autoexit_hold(&binding, a->position);
+        }
+#endif
         zmk_behavior_invoke_binding(&binding, event, pressed);
 #else
         LOG_WRN("flask_combos: behavior outputs need CONFIG_ZMK_BEHAVIOR_LOCAL_IDS");
