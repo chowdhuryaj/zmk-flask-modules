@@ -59,8 +59,11 @@ enum flask_combo_action {
 #define FLASK_COMBO_OUT_MAX FLASK_COMBO_OUT_BEHAVIOR
 
 /* Layer gate sentinel: slot fires on any layer. Otherwise the slot's layer
- * is a LAYER INDEX (same wire domain as automouse 0x1B), checked against
- * zmk_keymap_highest_layer_active() when the first combo key goes down. */
+ * is a LAYER ID (the stable id Studio keeps across reordering, = the DT
+ * child order of the compiled keymap and of a DT combo's `layers`; NOT the
+ * order index automouse 0x1B uses). The app writes ids here. Checked when
+ * the first combo key goes down: the slot is a candidate only if its id is
+ * the id of the highest active layer. */
 #define FLASK_COMBOS_LAYER_ANY 0xFF
 
 /* One runtime combo: up to FLASK_COMBOS_KEYS key positions (0xFF = unused)
@@ -79,7 +82,7 @@ struct flask_combo_slot {
     uint32_t param2;
     uint16_t timeout_ms;    /* 0 = global */
     uint16_t prior_idle_ms; /* 0 = off */
-    uint8_t layer;          /* index; FLASK_COMBOS_LAYER_ANY = all */
+    uint8_t layer;          /* layer ID; FLASK_COMBOS_LAYER_ANY = all */
 } __packed;
 
 bool flask_combos_enabled(void);

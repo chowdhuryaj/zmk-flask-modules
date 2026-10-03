@@ -129,8 +129,9 @@ static void fire_output_raw(const struct flask_tapdance_output *out, uint32_t po
             .param1 = out->param1,
             .param2 = out->param2,
         };
+        /* ZMK's event.layer is a layer ID; highest_layer_active is an INDEX. */
         struct zmk_behavior_binding_event event = {
-            .layer = zmk_keymap_highest_layer_active(),
+            .layer = zmk_keymap_layer_index_to_id(zmk_keymap_highest_layer_active()),
             .position = position,
             .timestamp = timestamp,
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)

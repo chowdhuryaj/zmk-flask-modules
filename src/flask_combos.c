@@ -201,8 +201,9 @@ static void fire_output(const struct active_rt *a, bool pressed, int64_t timesta
             .param1 = a->param1,
             .param2 = a->param2,
         };
+        /* ZMK's event.layer is a layer ID; highest_layer_active is an INDEX. */
         struct zmk_behavior_binding_event event = {
-            .layer = zmk_keymap_highest_layer_active(),
+            .layer = zmk_keymap_layer_index_to_id(zmk_keymap_highest_layer_active()),
             .position = a->position,
             .timestamp = timestamp,
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
@@ -233,12 +234,16 @@ static uint16_t slot_eff_timeout(int i) {
 }
 
 /* First-key candidate gates (core combo.c setup_candidates_for_first_keypress):
- * layer mask via the highest active layer INDEX, prior-idle via the last
- * non-mod tap (is_quick_tap). Both checked only here — once a candidate
- * set is open, later keys just filter it (core semantics). */
+ * layer gate = the slot's layer ID must be the ID of the highest active
+ * layer (core matches its DT `layers` mask the same way; core compares that
+ * id mask against an INDEX, which breaks once Studio reorders layers, so
+ * this converts index -> id first). Prior-idle via the last non-mod tap
+ * (is_quick_tap). Both checked only here — once a candidate set is open,
+ * later keys just filter it (core semantics). */
 static int setup_candidates(uint32_t position, int64_t timestamp, uint64_t *out) {
     uint64_t set = 0;
-    uint8_t highest = zmk_keymap_highest_layer_active();
+    const zmk_keymap_layer_id_t highest =
+        zmk_keymap_layer_index_to_id(zmk_keymap_highest_layer_active());
 
     K_SPINLOCK(&cfg_lock) {
         if (cfg_enabled && position < ZMK_KEYMAP_LEN) {
@@ -871,7 +876,7 @@ struct flask_combo_default {
     uint8_t pos[FLASK_COMBOS_KEYS];
     uint16_t timeout_ms;
     uint16_t prior_idle_ms;
-    uint8_t layer;
+    uint8_t layer; /* DT `layers`[0]: a compiled layer ID, same domain as the slot field */
     struct zmk_behavior_binding binding;
 };
 

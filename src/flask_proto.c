@@ -1647,7 +1647,8 @@ static bool handle_combos(uint8_t cmd, uint8_t value_id, uint8_t *payload,
     }
     case COMBOS_SLOT_V3: {
         /* v14 view: the v2 frame + [timeout u16 BE, prior_idle u16 BE,
-         * layer index (0xFF = all)]. Slot byte echoes untouched. */
+         * layer ID (0xFF = all; an id, not an order index)]. Slot byte
+         * echoes untouched. */
         const size_t a = 1 + FLASK_COMBOS_KEYS;
         const size_t t = a + 11;
 

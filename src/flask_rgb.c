@@ -745,6 +745,7 @@ int flask_rgb_settings_restore(size_t len, settings_read_cb read_cb, void *cb_ar
 static int frgb_layer_listener(const zmk_event_t *eh) {
     ARG_UNUSED(eh);
 
+    /* TODO: keyed by layer INDEX; Studio layer reordering moves colors to other layers. */
     uint8_t highest = zmk_keymap_highest_layer_active();
 
     K_SPINLOCK(&frgb_lock) { frgb_layer = highest; }
