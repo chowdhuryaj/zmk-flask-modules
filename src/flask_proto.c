@@ -104,6 +104,10 @@
 #include <flask_adaptive/flask_adaptive.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+#include <flask_autoshift/flask_autoshift.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Per-module channels compile only when their module does — a channel whose
@@ -223,8 +227,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * off), run on the system workqueue. An ID, not an index: it matches the
  * keymap's &to cells and survives Studio layer removal/reorder (the active
  * layer GET 0x02 answers an index). Unknown or Studio-removed ID -> 0xFF.
- * Host tools use it to put the board back on a layer (Neru on-exit). */
-#define FLASK_PROTO_VERSION 18
+ * Host tools use it to put the board back on a layer (Neru on-exit).
+ * v19 (2026-10-02): global auto shift + retro shift channel 0x2C
+ * (flask_autoshift — enabled 0x01, timeout ms 0x02, groups bitmask 0x03,
+ * modifiers 0x04, repeat 0x05, no-auto-repeat 0x06, retro 0x07, retro limit
+ * ms 0x08; every value a plain u16, SET echoes the clamped value, SAVE via
+ * "flask/autoshift"). Ships OFF; probe = proto >= 19 and GET 0x02 answers.
+ * Wire and semantics: src/flask_autoshift.c. */
+#define FLASK_PROTO_VERSION 19
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -255,6 +265,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_SCROLLSCALE 0x29 /* ZMK-line: flask_scrollscale (v15) */
 #define CH_HOLDTAP 0x2A /* ZMK-line: flask_holdtap (v17) */
 #define CH_ADAPTIVE 0x2B /* ZMK-line: flask_adaptive (v18) */
+#define CH_AUTOSHIFT 0x2C /* ZMK-line: flask_autoshift (v19) */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -338,6 +349,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define AM_THRESHOLD 0x03 /* accumulated counts before trigger; 0 = any motion */
 #define AM_LAYER 0x04     /* layer INDEX */
 #define AM_EXTEND 0x05    /* non-transparent key on the layer re-arms the timeout */
+
+/* Auto shift values (channel 0x2C, ZMK line). Every value is a plain u16. */
+#define ASH_ENABLED 0x01
+#define ASH_TIMEOUT 0x02 /* ms, 50..1000 */
+#define ASH_GROUPS 0x03 /* bit0 alpha 1 numeric 2 symbols 3 tab 4 enter */
+#define ASH_MODIFIERS 0x04
+#define ASH_REPEAT 0x05
+#define ASH_NO_AUTO_REPEAT 0x06
+#define ASH_RETRO 0x07
+#define ASH_RETRO_LIMIT 0x08 /* ms, 0 = no limit, else 50..5000 */
 
 /* Accel values — same wire vocabulary as the QMK families (pd_accel over
  * mad_hid.c): x100 fixed-point floats, offset is SIGNED. */
@@ -559,6 +580,13 @@ static uint8_t keystate_bitmap[KEYSTATE_BYTES];
 static int flask_keystate_listener(const zmk_event_t *eh) {
     const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+    /* Earliest point every press passes (this listener links before combos):
+     * a pending auto-shift key is typed before any later press takes effect. */
+    if (ev != NULL && ev->state) {
+        flask_autoshift_flush(ev->position, ev->timestamp);
+    }
+#endif
     if (ev == NULL || ev->position >= KEYSTATE_BYTES * 8) {
         return ZMK_EV_EVENT_BUBBLE;
     }
@@ -1328,6 +1356,81 @@ static bool handle_automouse(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE */
 
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+static bool handle_autoshift(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_autoshift_cfg c;
+
+    flask_autoshift_get(&c);
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case ASH_ENABLED:
+            c.enabled = (v != 0);
+            break;
+        case ASH_TIMEOUT:
+            c.timeout_ms = v;
+            break;
+        case ASH_GROUPS:
+            c.groups = (uint8_t)(v & 0xFF) & FLASK_AUTOSHIFT_GRP_MASK;
+            break;
+        case ASH_MODIFIERS:
+            c.modifiers = (v != 0);
+            break;
+        case ASH_REPEAT:
+            c.repeat = (v != 0);
+            break;
+        case ASH_NO_AUTO_REPEAT:
+            c.no_auto_repeat = (v != 0);
+            break;
+        case ASH_RETRO:
+            c.retro = (v != 0);
+            break;
+        case ASH_RETRO_LIMIT:
+            c.retro_limit_ms = v;
+            break;
+        default:
+            return false;
+        }
+        flask_autoshift_set(&c);
+        /* re-read so the echo carries the clamped value */
+        flask_autoshift_get(&c);
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case ASH_ENABLED:
+        wr_u16(payload, c.enabled ? 1 : 0);
+        return true;
+    case ASH_TIMEOUT:
+        wr_u16(payload, c.timeout_ms);
+        return true;
+    case ASH_GROUPS:
+        wr_u16(payload, c.groups);
+        return true;
+    case ASH_MODIFIERS:
+        wr_u16(payload, c.modifiers ? 1 : 0);
+        return true;
+    case ASH_REPEAT:
+        wr_u16(payload, c.repeat ? 1 : 0);
+        return true;
+    case ASH_NO_AUTO_REPEAT:
+        wr_u16(payload, c.no_auto_repeat ? 1 : 0);
+        return true;
+    case ASH_RETRO:
+        wr_u16(payload, c.retro ? 1 : 0);
+        return true;
+    case ASH_RETRO_LIMIT:
+        wr_u16(payload, c.retro_limit_ms);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_FLASK_AUTOSHIFT */
+
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_BALLSWAP)
 static bool handle_ballswap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     switch (value_id) {
@@ -1973,6 +2076,10 @@ static bool handle_save(uint8_t channel) {
     case CH_ADAPTIVE:
         return flask_adaptive_save() == 0;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+    case CH_AUTOSHIFT:
+        return flask_autoshift_save() == 0;
+#endif
     default:
         return false;
     }
@@ -2111,6 +2218,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
         case CH_ADAPTIVE:
             ok = handle_adaptive(cmd, value_id, payload, sizeof(reply) - 3);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+        case CH_AUTOSHIFT:
+            ok = handle_autoshift(cmd, value_id, payload);
             break;
 #endif
         default:
@@ -2277,6 +2389,11 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE)
     if (settings_name_steq(name, "automouse", NULL)) {
         return flask_automouse_settings_restore(len, read_cb, cb_arg);
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
+    if (settings_name_steq(name, "autoshift", NULL)) {
+        return flask_autoshift_settings_restore(len, read_cb, cb_arg);
     }
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS)

@@ -281,6 +281,28 @@ static bool match_slot(const struct zmk_keycode_state_changed *ev, uint8_t expl,
     return true;
 }
 
+/* Pair lookup for flask_autoshift: what Shift + this keymap-encoded usage
+ * (page 0 = keyboard page) types under csk right now (enabled, OS mode,
+ * slot tiers as on a real press with Shift alone held). Usage mods bits are
+ * ignored. A keep slot leaves Shift in the register, so it rides on repl. */
+bool flask_csk_lookup(uint32_t usage, uint32_t *repl) {
+    uint8_t page = ENC_PAGE(usage);
+    struct zmk_keycode_state_changed ev = {
+        .usage_page = page ? page : 7,
+        .keycode = ENC_ID(usage),
+    };
+    zmk_mod_flags_t mask;
+    uint8_t flags;
+
+    if (!match_slot(&ev, FLASK_CSK_TRIGGER_SHIFT, 0, repl, &mask, &flags)) {
+        return false;
+    }
+    if (flags & FLASK_CSK_FLAG_KEEP) {
+        *repl |= (uint32_t)MOD_LSFT << 24;
+    }
+    return true;
+}
+
 static void apply_replacement(struct zmk_keycode_state_changed *ev, uint32_t repl) {
     ev->usage_page = ENC_PAGE(repl);
     ev->keycode = ENC_ID(repl);

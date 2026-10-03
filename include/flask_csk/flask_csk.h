@@ -91,6 +91,10 @@ uint16_t flask_csk_os_mode(void);
 int flask_csk_slot_get(uint8_t idx, struct flask_csk_slot *out);
 int flask_csk_slot_set(uint8_t idx, const struct flask_csk_slot *in);
 
+/* The slot pair for a keymap-encoded usage (page 0 = 7), for flask_autoshift's
+ * shifted output. false when csk is off or no live pair matches. */
+bool flask_csk_lookup(uint32_t usage, uint32_t *repl);
+
 /* Persist via settings subtree "flask/csk" ("cfg" + "s<idx>" per used
  * slot; Shift/no-flag slots keep the old 8-byte blob, others write 10). CMD_SAVE path — runs on the flask_save queue only. */
 int flask_csk_save(void);
