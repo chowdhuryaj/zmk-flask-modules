@@ -110,9 +110,11 @@ static struct {
  *   already seen, a neutralizer mod tap goes out in its own reports while
  *   the mod is still reported, so the mod's later disappearance is not a
  *   lone tap. The neutralizer is the first of Right Ctrl, Left Ctrl, Right
- *   Shift that is neither held, hidden nor in the report (a held one would
- *   only bump its press count and never reach the host, e.g. the Totem's
- *   &fht_r RCTRL thumb). Mods, not F24: a Ctrl/Shift tap does nothing on
+ *   Shift that is neither held nor in the report (a held one would only
+ *   bump its press count and never reach the host, e.g. the Totem's
+ *   &fht_r RCTRL thumb). If only csk's own mask hides it (a live override
+ *   masks both sides of its trigger), that bit is lifted for the tap; the
+ *   register is rewritten right after anyway. Mods, not F24: a Ctrl/Shift tap does nothing on
  *   its own in Windows or macOS, while F13-F24 are common AutoHotkey /
  *   macro-pad bindings and would fire as Win+F24. If all three are busy,
  *   no tap is sent (three mods already down make a lone Win tap moot in
@@ -126,19 +128,29 @@ static struct {
 #define CSK_MENU_MODS CSK_SIDES(0x0C) /* Alt + GUI, both sides */
 static zmk_mod_flags_t sticky;
 
-static void neutralize(zmk_mod_flags_t hidden) {
+/* own = csk's current mask (what the register holds for csk). */
+static void neutralize(zmk_mod_flags_t own) {
     static const zmk_mod_t cand[] = {4, 0, 5}; /* Right Ctrl, Left Ctrl, Right Shift */
-    zmk_mod_flags_t busy = zmk_hid_get_keyboard_report()->body.modifiers |
-                           zmk_hid_get_explicit_mods() | hidden;
+    zmk_mod_flags_t busy =
+        zmk_hid_get_keyboard_report()->body.modifiers | zmk_hid_get_explicit_mods();
 
     for (size_t i = 0; i < ARRAY_SIZE(cand); i++) {
-        if (!(busy & BIT(cand[i]))) {
-            zmk_hid_register_mod(cand[i]);
-            zmk_endpoint_send_report(HID_USAGE_KEY);
-            zmk_hid_unregister_mod(cand[i]);
-            zmk_endpoint_send_report(HID_USAGE_KEY);
-            return;
+        zmk_mod_flags_t bit = BIT(cand[i]);
+
+        if (busy & bit) {
+            continue;
         }
+        if (own & bit) {
+            zmk_hid_masked_modifiers_set(own & ~bit);
+        }
+        zmk_hid_register_mod(cand[i]);
+        zmk_endpoint_send_report(HID_USAGE_KEY);
+        zmk_hid_unregister_mod(cand[i]);
+        zmk_endpoint_send_report(HID_USAGE_KEY);
+        if (own & bit) {
+            zmk_hid_masked_modifiers_set(own);
+        }
+        return;
     }
 }
 
