@@ -8,8 +8,10 @@
  * replacement usage (its modifier bits land in implicit_modifiers) and
  * the trigger's mods (both sides) are masked out of the report via the
  * mod-morph mechanism (zmk_hid_masked_modifiers_set) unless the slot
- * keeps them. Explicit mods include hold-tap holds and sticky keys: both
- * press a real modifier keycode before the morphed key's event arrives.
+ * keeps them. Explicit mods include hold-tap holds and non-lazy sticky
+ * keys: both press a real modifier keycode before the morphed key's event
+ * arrives. A `lazy` sticky key presses its mod only when the next key
+ * arrives (its listener links after this one), so csk does not see it.
  * The RELEASE arrives carrying the ORIGINAL usage — whatever pressed it
  * releases the same code — so an active-override table maps it back to
  * the replacement, keeping HID press/release paired even when the mods
@@ -262,7 +264,9 @@ struct flask_csk_saved_cfg {
 
 int flask_csk_save(void) {
     struct flask_csk_saved_cfg saved = {.version = CSK_SETTINGS_VERSION};
-    struct flask_csk_slot slots[FLASK_CSK_SLOTS];
+    /* static: 32 slots = 320 B, too much for the 2 KB flask_save stack;
+     * the save queue is single-flight (same as flask_combos). */
+    static struct flask_csk_slot slots[FLASK_CSK_SLOTS];
     uint32_t pending, saved_bits;
     bool write_cfg;
 
