@@ -107,11 +107,16 @@ static struct {
 /* OS-aware slots only (flags bits 1-4), the QMK key-override fix for the
  * Windows Start menu / Alt menu bar: a lone GUI or Alt down/up opens them.
  * - Before a match first hides an explicitly held GUI/Alt the host has
- *   already seen, a Right Ctrl tap goes out in its own reports while the
- *   mod is still reported, so the mod's later disappearance is not a lone
- *   tap. Right Ctrl, not F24: a Ctrl tap does nothing on its own in Windows
- *   or macOS, while F-keys (F13-F24) are common AutoHotkey / macro-pad
- *   bindings and would fire as Win+F24 / Alt+F24.
+ *   already seen, a neutralizer mod tap goes out in its own reports while
+ *   the mod is still reported, so the mod's later disappearance is not a
+ *   lone tap. The neutralizer is the first of Right Ctrl, Left Ctrl, Right
+ *   Shift that is neither held, hidden nor in the report (a held one would
+ *   only bump its press count and never reach the host, e.g. the Totem's
+ *   &fht_r RCTRL thumb). Mods, not F24: a Ctrl/Shift tap does nothing on
+ *   its own in Windows or macOS, while F13-F24 are common AutoHotkey /
+ *   macro-pad bindings and would fire as Win+F24. If all three are busy,
+ *   no tap is sent (three mods already down make a lone Win tap moot in
+ *   practice).
  * - After the overriding key is released, its masked GUI/Alt stays hidden
  *   (sticky) until that mod is physically released, so the host never sees
  *   Win come back alone and go up. A key press that matches no slot
@@ -119,8 +124,23 @@ static struct {
  *   is not a lone tap, so no neutralizer is needed there. */
 #define CSK_OSK_FLAGS (FLASK_CSK_FLAG_OS_MASK | FLASK_CSK_FLAG_WILD | FLASK_CSK_FLAG_IMPLICIT)
 #define CSK_MENU_MODS CSK_SIDES(0x0C) /* Alt + GUI, both sides */
-#define CSK_NEUTRALIZER 4             /* zmk_mod_t Right Ctrl */
 static zmk_mod_flags_t sticky;
+
+static void neutralize(zmk_mod_flags_t hidden) {
+    static const zmk_mod_t cand[] = {4, 0, 5}; /* Right Ctrl, Left Ctrl, Right Shift */
+    zmk_mod_flags_t busy = zmk_hid_get_keyboard_report()->body.modifiers |
+                           zmk_hid_get_explicit_mods() | hidden;
+
+    for (size_t i = 0; i < ARRAY_SIZE(cand); i++) {
+        if (!(busy & BIT(cand[i]))) {
+            zmk_hid_register_mod(cand[i]);
+            zmk_endpoint_send_report(HID_USAGE_KEY);
+            zmk_hid_unregister_mod(cand[i]);
+            zmk_endpoint_send_report(HID_USAGE_KEY);
+            return;
+        }
+    }
+}
 
 static uint8_t slot_trigger(const struct flask_csk_slot *s) {
     return s->mods ? s->mods : FLASK_CSK_TRIGGER_SHIFT;
@@ -292,10 +312,7 @@ static int csk_listener(const zmk_event_t *eh) {
             bool osk = (flags & CSK_OSK_FLAGS) != 0;
 
             if (osk && (mask & ~before & CSK_MENU_MODS & zmk_hid_get_explicit_mods())) {
-                zmk_hid_register_mod(CSK_NEUTRALIZER);
-                zmk_endpoint_send_report(HID_USAGE_KEY);
-                zmk_hid_unregister_mod(CSK_NEUTRALIZER);
-                zmk_endpoint_send_report(HID_USAGE_KEY);
+                neutralize(before);
             }
             actives[i].live = true;
             actives[i].orig_page = ev->usage_page;
