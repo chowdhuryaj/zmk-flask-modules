@@ -47,6 +47,7 @@
 #include <dt-bindings/zmk/modifiers.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
+#include <zmk/endpoints.h>
 #include <zmk/hid.h>
 #include <zmk/keys.h>
 
@@ -100,7 +101,26 @@ static struct {
     uint8_t orig_page;
     zmk_mod_flags_t mask;
     uint32_t repl;
+    bool osk; /* matched slot had flags bits 1-4 (OS-aware rules below) */
 } actives[CSK_MAX_ACTIVE];
+
+/* OS-aware slots only (flags bits 1-4), the QMK key-override fix for the
+ * Windows Start menu / Alt menu bar: a lone GUI or Alt down/up opens them.
+ * - Before a match first hides an explicitly held GUI/Alt the host has
+ *   already seen, a Right Ctrl tap goes out in its own reports while the
+ *   mod is still reported, so the mod's later disappearance is not a lone
+ *   tap. Right Ctrl, not F24: a Ctrl tap does nothing on its own in Windows
+ *   or macOS, while F-keys (F13-F24) are common AutoHotkey / macro-pad
+ *   bindings and would fire as Win+F24 / Alt+F24.
+ * - After the overriding key is released, its masked GUI/Alt stays hidden
+ *   (sticky) until that mod is physically released, so the host never sees
+ *   Win come back alone and go up. A key press that matches no slot
+ *   unmasks first: the mod and that key arrive in ONE report (Win+X), which
+ *   is not a lone tap, so no neutralizer is needed there. */
+#define CSK_OSK_FLAGS (FLASK_CSK_FLAG_OS_MASK | FLASK_CSK_FLAG_WILD | FLASK_CSK_FLAG_IMPLICIT)
+#define CSK_MENU_MODS CSK_SIDES(0x0C) /* Alt + GUI, both sides */
+#define CSK_NEUTRALIZER 4             /* zmk_mod_t Right Ctrl */
+static zmk_mod_flags_t sticky;
 
 static uint8_t slot_trigger(const struct flask_csk_slot *s) {
     return s->mods ? s->mods : FLASK_CSK_TRIGGER_SHIFT;
@@ -140,7 +160,7 @@ uint16_t flask_csk_os_mode(void) {
 }
 
 static zmk_mod_flags_t active_mask(void) {
-    zmk_mod_flags_t m = 0;
+    zmk_mod_flags_t m = sticky;
 
     for (int i = 0; i < CSK_MAX_ACTIVE; i++) {
         if (actives[i].live) {
@@ -164,9 +184,10 @@ static void update_mask(zmk_mod_flags_t before) {
 }
 
 /* expl/impl = folded explicit / event-implicit mods. Pass 0 = specific
- * slots (exact set), pass 1 = wildcards (trigger subset of held). */
+ * OS-conditioned slots, pass 1 = specific any-OS slots (exact set),
+ * pass 2 = wildcards (trigger subset of held). First match wins. */
 static bool match_slot(const struct zmk_keycode_state_changed *ev, uint8_t expl, uint8_t impl,
-                       uint32_t *repl, zmk_mod_flags_t *mask) {
+                       uint32_t *repl, zmk_mod_flags_t *mask, uint8_t *flags) {
     uint8_t page = (uint8_t)ev->usage_page;
     uint16_t id = (uint16_t)ev->keycode;
     uint16_t os = flask_csk_os_mode();
@@ -177,14 +198,15 @@ static bool match_slot(const struct zmk_keycode_state_changed *ev, uint8_t expl,
         if (!cfg_enabled) {
             K_SPINLOCK_BREAK;
         }
-        for (int pass = 0; pass < 2 && !found; pass++) {
+        for (int pass = 0; pass < 3 && !found; pass++) {
             for (int i = 0; i < FLASK_CSK_SLOTS; i++) {
                 const struct flask_csk_slot *s = &cfg.slots[i];
                 bool wild = (s->flags & FLASK_CSK_FLAG_WILD) != 0;
+                int tier = wild ? 2 : (s->flags & FLASK_CSK_FLAG_OS_MASK) ? 0 : 1;
                 uint8_t trig = slot_trigger(s);
                 uint8_t held = expl | ((s->flags & FLASK_CSK_FLAG_IMPLICIT) ? impl : 0);
 
-                if (wild != pass || !slot_live(s) || !os_ok(s->flags, os)) {
+                if (tier != pass || !slot_live(s) || !os_ok(s->flags, os)) {
                     continue;
                 }
                 if (wild ? (trig & held) == trig
@@ -203,6 +225,8 @@ static bool match_slot(const struct zmk_keycode_state_changed *ev, uint8_t expl,
     uint8_t trig = slot_trigger(&hit);
     bool keep = (hit.flags & FLASK_CSK_FLAG_KEEP) != 0;
     bool counts_impl = (hit.flags & FLASK_CSK_FLAG_IMPLICIT) != 0;
+
+    *flags = hit.flags;
 
     /* Only explicitly held trigger mods sit in the register; for old slots
      * trig == expl, so this is the old CSK_SIDES(held). */
@@ -245,9 +269,18 @@ static int csk_listener(const zmk_event_t *eh) {
         uint8_t impl = CSK_FOLD(ev->implicit_modifiers);
         uint32_t repl;
         zmk_mod_flags_t mask;
+        uint8_t flags;
 
-        if (!(expl | impl) || is_mod(ev->usage_page, ev->keycode) ||
-            !match_slot(ev, expl, impl, &repl, &mask)) {
+        if (!(expl | impl) || is_mod(ev->usage_page, ev->keycode)) {
+            return ZMK_EV_EVENT_BUBBLE;
+        }
+        if (!match_slot(ev, expl, impl, &repl, &mask, &flags)) {
+            if (sticky) { /* unmatched key: GUI/Alt rejoins in this key's report */
+                zmk_mod_flags_t before = active_mask();
+
+                sticky = 0;
+                update_mask(before);
+            }
             return ZMK_EV_EVENT_BUBBLE;
         }
 
@@ -256,12 +289,20 @@ static int csk_listener(const zmk_event_t *eh) {
                 continue;
             }
             zmk_mod_flags_t before = active_mask();
+            bool osk = (flags & CSK_OSK_FLAGS) != 0;
 
+            if (osk && (mask & ~before & CSK_MENU_MODS & zmk_hid_get_explicit_mods())) {
+                zmk_hid_register_mod(CSK_NEUTRALIZER);
+                zmk_endpoint_send_report(HID_USAGE_KEY);
+                zmk_hid_unregister_mod(CSK_NEUTRALIZER);
+                zmk_endpoint_send_report(HID_USAGE_KEY);
+            }
             actives[i].live = true;
             actives[i].orig_page = ev->usage_page;
             actives[i].orig_id = (uint16_t)ev->keycode;
             actives[i].mask = mask;
             actives[i].repl = repl;
+            actives[i].osk = osk;
             update_mask(before);
             apply_replacement(ev, repl);
             LOG_DBG("flask_csk: %02x/%04x -> %08x", actives[i].orig_page, actives[i].orig_id,
@@ -269,6 +310,18 @@ static int csk_listener(const zmk_event_t *eh) {
             return ZMK_EV_EVENT_BUBBLE;
         }
         return ZMK_EV_EVENT_BUBBLE; /* table full — let the plain key through */
+    }
+
+    /* Mod release: a sticky GUI/Alt unhides once no side of it is held
+     * (cleared here, before the HID listener drops the mod, so no report
+     * carries it). */
+    if (sticky && is_mod(ev->usage_page, ev->keycode)) {
+        zmk_mod_flags_t before = active_mask();
+        zmk_mod_flags_t left = zmk_hid_get_explicit_mods() & ~BIT(ev->keycode - HID_USAGE_KEY_KEYBOARD_LEFTCONTROL);
+
+        sticky &= CSK_SIDES(CSK_FOLD(left));
+        update_mask(before);
+        return ZMK_EV_EVENT_BUBBLE;
     }
 
     /* Release: map an active override's ORIGINAL usage back to the
@@ -283,6 +336,10 @@ static int csk_listener(const zmk_event_t *eh) {
 
         apply_replacement(ev, actives[i].repl);
         actives[i].live = false;
+        if (actives[i].osk) {
+            sticky |= actives[i].mask & CSK_MENU_MODS &
+                      CSK_SIDES(CSK_FOLD(zmk_hid_get_explicit_mods()));
+        }
         update_mask(before);
         break;
     }
