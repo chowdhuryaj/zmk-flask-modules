@@ -212,7 +212,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * fires the output chosen by the last key typed (urob/zmk-adaptive-key
  * semantics, modifier keys never count as the last key); the rule pool is
  * shared by all sets and compiled defaults come from a
- * `flask,adaptive-defaults` node over the keymap's existing ak nodes. */
+ * `flask,adaptive-defaults` node over the keymap's existing ak nodes.
+ * Later on v18, no bump (feature-detected, old images echo 0xFF): custom
+ * shift 0x16 becomes full mod-morph — morph caps 0x03 RO (= 1) and the
+ * slot frame 0x50 grows to [slot, base u32 BE, repl u32 BE, trigger mods
+ * (bit0 Ctrl, bit1 Shift, bit2 Alt, bit3 GUI; 0 on SET = Shift), flags
+ * (bit0 keep)]; high mod bits or unknown flags -> 0xFF. */
 #define FLASK_PROTO_VERSION 18
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
@@ -354,7 +359,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * 0x10+/0x30+ which cannot carry 32-bit ZMK usages) */
 #define CSK_ENABLED 0x01
 #define CSK_SLOT_COUNT 0x02 /* RO */
-#define CSK_SLOT 0x50 /* payload-addressed: [slot, base u32 BE, shifted u32 BE] */
+#define CSK_MORPH_CAPS 0x03 /* RO u16: 1 = slot frame carries mods + flags */
+#define CSK_SLOT 0x50 /* payload-addressed: [slot, base u32 BE, shifted u32 BE, mods, flags] */
 
 /* Tap dance values (channel 0x28, ZMK line — Vial serves QMK tap dance
  * over its own protocol, so there is no QMK Flask channel to mirror) */
@@ -783,7 +789,8 @@ static bool handle_leader(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_CSK)
 /* Channel 0x16 — the slot value is a PAYLOAD-ADDRESSED byte frame:
- * [slot, base u32 BE, shifted u32 BE]. Slot byte echoes untouched. */
+ * [slot, base u32 BE, shifted u32 BE, mods, flags]. Slot byte echoes
+ * untouched. An old app's 8-byte frame leaves mods/flags zero = Shift. */
 static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
     switch (value_id) {
     case CSK_ENABLED:
@@ -798,8 +805,14 @@ static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t p
         }
         wr_u16(payload, flask_csk_slot_count());
         return true;
+    case CSK_MORPH_CAPS:
+        if (cmd != CMD_GET) {
+            return false;
+        }
+        wr_u16(payload, 1);
+        return true;
     case CSK_SLOT: {
-        if (payload_len < 1 + 4 + 4) {
+        if (payload_len < 1 + 4 + 4 + 2) {
             return false;
         }
         uint8_t slot = payload[0];
@@ -810,6 +823,8 @@ static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t p
                      ((uint32_t)payload[3] << 8) | payload[4];
             s.shifted = ((uint32_t)payload[5] << 24) | ((uint32_t)payload[6] << 16) |
                         ((uint32_t)payload[7] << 8) | payload[8];
+            s.mods = payload[9];
+            s.flags = payload[10];
             if (flask_csk_slot_set(slot, &s) != 0) {
                 return false;
             }
@@ -825,6 +840,8 @@ static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t p
         payload[6] = s.shifted >> 16;
         payload[7] = s.shifted >> 8;
         payload[8] = s.shifted;
+        payload[9] = s.mods;
+        payload[10] = s.flags;
         return true;
     }
     default:
