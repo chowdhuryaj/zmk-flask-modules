@@ -97,6 +97,7 @@
  *                 0 flavor on another key, 1 timer, 2 positional forced
  *                 tap, 3 require-prior-idle, 4 quick-tap, 5 released
  *                 undecided), +2 first other key pressed while undecided
+ *                 and still undecided after the late-timer check
  *                 (0xFF none), +3 held_ms u16 (press → release, saturating),
  *                 +5 other_ms u16 (press → that other press, 0xFFFF none),
  *                 +7 prior_gap = ms since the last non-modifier keycode press
@@ -1285,6 +1286,14 @@ static const struct behavior_driver_api behavior_flask_hold_tap_driver_api = {
 #endif
 };
 
+static void record_first_other(struct active_hold_tap *hold_tap,
+                               const struct zmk_position_state_changed *ev) {
+    if ((trigger_on_release(hold_tap) != ev->state) &&
+        (hold_tap->position_of_first_other_key_pressed == -1)) {
+        hold_tap->position_of_first_other_key_pressed = ev->position;
+    }
+}
+
 static int position_state_changed_listener(const zmk_event_t *eh) {
     struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
 
@@ -1294,14 +1303,14 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    if ((trigger_on_release(undecided_hold_tap) != ev->state) &&
-        (undecided_hold_tap->position_of_first_other_key_pressed == -1)) {
-        undecided_hold_tap->position_of_first_other_key_pressed = ev->position;
-    }
-    if (ev->state && undecided_hold_tap->position != ev->position &&
-        undecided_hold_tap->log_other_pos == 0xFF) {
-        undecided_hold_tap->log_other_pos = ev->position;
-        undecided_hold_tap->log_other_ts = ev->timestamp;
+    /* Mode 0 keeps core's order (record, then the late-timer check, own key
+     * included). Runtime modes 2/3 record only another key, and only once
+     * the late-timer check left the hold-tap undecided. */
+    bool runtime_pos = undecided_hold_tap->pos.mode == FLASK_HT_POS_ON_PRESS ||
+                       undecided_hold_tap->pos.mode == FLASK_HT_POS_ON_RELEASE;
+
+    if (!runtime_pos) {
+        record_first_other(undecided_hold_tap, ev);
     }
 
     if (undecided_hold_tap->position == ev->position) {
@@ -1317,6 +1326,14 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
 
     if (undecided_hold_tap == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    if (runtime_pos) {
+        record_first_other(undecided_hold_tap, ev);
+    }
+    if (ev->state && undecided_hold_tap->log_other_pos == 0xFF) {
+        undecided_hold_tap->log_other_pos = ev->position;
+        undecided_hold_tap->log_other_ts = ev->timestamp;
     }
 
     if (!ev->state && !have_captured_keydown_event(ev->position)) {
