@@ -223,9 +223,10 @@ config ZMK_FLASK_CSK
     depends on SETTINGS
     help
       Runtime custom shift pairs (QMK custom_shift_keys analog, channel
-      0x16): while Shift is held, a key whose base usage matches a slot
-      sends the slot's shifted usage instead, with the physical Shift
-      masked out of the report. Pure keycode-event hook — no per-key
+      0x16), generalised to mod-morph: while a slot's exact modifier set
+      (any of Ctrl/Shift/Alt/GUI, either side) is held, a key whose base
+      usage matches sends the slot's replacement instead, with those
+      modifiers masked out of the report unless the slot keeps them. Pure keycode-event hook — no per-key
       mod-morph nodes. Central-only on splits (no DT node — enable
       explicitly in the board .conf).
 
@@ -233,9 +234,10 @@ config ZMK_FLASK_CSK_SLOTS
     int "Custom shift key slots"
     depends on ZMK_FLASK_CSK
     range 1 32
-    default 16
+    default 32
     help
-      How many base/shifted pairs the table holds (QMK CSK_SLOTS is 16).
+      How many slots the table holds (10 bytes RAM each; QMK CSK_SLOTS is
+      16). 32 is the cap: save bookkeeping uses u32 bitmaps.
 
 config ZMK_FLASK_TAPDANCE
     bool "Flask runtime tap dances"

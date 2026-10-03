@@ -3,17 +3,23 @@
  *
  * The hook rides zmk_keycode_state_changed BEFORE core's HID listener
  * (module sources link before app sources), mutating the event in place:
- * on a shifted press of a slot's base usage, the event becomes the
- * shifted usage (its modifier bits land in implicit_modifiers) and the
- * physical Shift is masked out of the report via the mod-morph mechanism
- * (zmk_hid_masked_modifiers_set). The RELEASE arrives carrying the
- * ORIGINAL usage — whatever pressed it releases the same code — so an
- * active-override table maps it back to the replacement, keeping HID
- * press/release paired even when Shift lifts first.
+ * when the held explicit mods (folded left|right) EQUAL a slot's trigger
+ * set and the press is the slot's base usage, the event becomes the
+ * replacement usage (its modifier bits land in implicit_modifiers) and
+ * the trigger's mods (both sides) are masked out of the report via the
+ * mod-morph mechanism (zmk_hid_masked_modifiers_set) unless the slot
+ * keeps them. Explicit mods include hold-tap holds and sticky keys: both
+ * press a real modifier keycode before the morphed key's event arrives.
+ * The RELEASE arrives carrying the ORIGINAL usage — whatever pressed it
+ * releases the same code — so an active-override table maps it back to
+ * the replacement, keeping HID press/release paired even when the mods
+ * lift or change first (state at press time decides).
  *
  * The masked-modifier register is a single global (mod-morph shares this
- * limit): it is set while at least one override is live and cleared when
- * the last one releases.
+ * limit): it holds the union of the live overrides' masks, written only
+ * when that union changes and cleared when it empties. A Shift-only table
+ * therefore makes exactly the old calls (set on first press, clear on
+ * last release).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -38,7 +44,10 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#define CSK_SHIFT_MASK (MOD_LSFT | MOD_RSFT)
+/* Side-agnostic 4-bit set (bit0 Ctrl, bit1 Shift, bit2 Alt, bit3 GUI) <->
+ * ZMK mod flags (left = bits 0-3, right = bits 4-7, same order). */
+#define CSK_FOLD(m) ((uint8_t)(((m) | ((m) >> 4)) & 0x0F))
+#define CSK_SIDES(t) ((zmk_mod_flags_t)((t) | ((t) << 4)))
 
 /* ZMK keymap encoding helpers (usage id 0-15, page 16-23, mods 24-31). */
 #define ENC_ID(v) ((uint16_t)((v) & 0xFFFF))
@@ -72,12 +81,40 @@ static struct {
     bool live;
     uint16_t orig_id;
     uint8_t orig_page;
+    zmk_mod_flags_t mask;
     uint32_t repl;
 } actives[CSK_MAX_ACTIVE];
 
-static int active_count;
+static uint8_t slot_trigger(const struct flask_csk_slot *s) {
+    return s->mods ? s->mods : FLASK_CSK_TRIGGER_SHIFT;
+}
 
-static bool match_slot(uint8_t page, uint16_t id, uint32_t *repl) {
+static zmk_mod_flags_t active_mask(void) {
+    zmk_mod_flags_t m = 0;
+
+    for (int i = 0; i < CSK_MAX_ACTIVE; i++) {
+        if (actives[i].live) {
+            m |= actives[i].mask;
+        }
+    }
+    return m;
+}
+
+static void update_mask(zmk_mod_flags_t before) {
+    zmk_mod_flags_t now = active_mask();
+
+    if (now == before) {
+        return;
+    }
+    if (now) {
+        zmk_hid_masked_modifiers_set(now);
+    } else {
+        zmk_hid_masked_modifiers_clear();
+    }
+}
+
+static bool match_slot(uint8_t page, uint16_t id, uint8_t held, uint32_t *repl,
+                       zmk_mod_flags_t *mask) {
     bool hit = false;
 
     K_SPINLOCK(&cfg_lock) {
@@ -90,8 +127,10 @@ static bool match_slot(uint8_t page, uint16_t id, uint32_t *repl) {
             if (s->base == 0 || s->shifted == 0) {
                 continue;
             }
-            if (ENC_PAGE(s->base) == page && ENC_ID(s->base) == id) {
+            if (slot_trigger(s) == held && ENC_PAGE(s->base) == page &&
+                ENC_ID(s->base) == id) {
                 *repl = s->shifted;
+                *mask = (s->flags & FLASK_CSK_FLAG_KEEP) ? 0 : CSK_SIDES(held);
                 hit = true;
                 break;
             }
@@ -114,12 +153,13 @@ static int csk_listener(const zmk_event_t *eh) {
     }
 
     if (ev->state) {
-        /* Press: only when a physical Shift is explicitly held. */
+        /* Press: only when some modifier is explicitly held. */
+        uint8_t held = CSK_FOLD(zmk_hid_get_explicit_mods());
         uint32_t repl;
+        zmk_mod_flags_t mask;
 
-        if (!(zmk_hid_get_explicit_mods() & CSK_SHIFT_MASK) ||
-            is_mod(ev->usage_page, ev->keycode) ||
-            !match_slot(ev->usage_page, (uint16_t)ev->keycode, &repl)) {
+        if (!held || is_mod(ev->usage_page, ev->keycode) ||
+            !match_slot(ev->usage_page, (uint16_t)ev->keycode, held, &repl, &mask)) {
             return ZMK_EV_EVENT_BUBBLE;
         }
 
@@ -127,13 +167,14 @@ static int csk_listener(const zmk_event_t *eh) {
             if (actives[i].live) {
                 continue;
             }
+            zmk_mod_flags_t before = active_mask();
+
             actives[i].live = true;
             actives[i].orig_page = ev->usage_page;
             actives[i].orig_id = (uint16_t)ev->keycode;
+            actives[i].mask = mask;
             actives[i].repl = repl;
-            if (active_count++ == 0) {
-                zmk_hid_masked_modifiers_set(CSK_SHIFT_MASK);
-            }
+            update_mask(before);
             apply_replacement(ev, repl);
             LOG_DBG("flask_csk: %02x/%04x -> %08x", actives[i].orig_page, actives[i].orig_id,
                     repl);
@@ -143,18 +184,18 @@ static int csk_listener(const zmk_event_t *eh) {
     }
 
     /* Release: map an active override's ORIGINAL usage back to the
-     * replacement so HID press/release stay paired (Shift may already be
-     * up — state at press time decides, like QMK CSK). */
+     * replacement so HID press/release stay paired (the mods may already
+     * be up or changed — state at press time decides, like QMK CSK). */
     for (int i = 0; i < CSK_MAX_ACTIVE; i++) {
         if (!actives[i].live || actives[i].orig_page != ev->usage_page ||
             actives[i].orig_id != (uint16_t)ev->keycode) {
             continue;
         }
+        zmk_mod_flags_t before = active_mask();
+
         apply_replacement(ev, actives[i].repl);
         actives[i].live = false;
-        if (--active_count == 0) {
-            zmk_hid_masked_modifiers_clear();
-        }
+        update_mask(before);
         break;
     }
     return ZMK_EV_EVENT_BUBBLE;
@@ -186,6 +227,7 @@ int flask_csk_slot_get(uint8_t idx, struct flask_csk_slot *out) {
         return -EINVAL;
     }
     K_SPINLOCK(&cfg_lock) { *out = cfg.slots[idx]; }
+    out->mods = slot_trigger(out);
     return 0;
 }
 
@@ -194,10 +236,14 @@ int flask_csk_slot_set(uint8_t idx, const struct flask_csk_slot *in) {
         return -EINVAL;
     }
 
+    if ((in->mods & 0xF0) || (in->flags & ~FLASK_CSK_FLAG_KEEP)) {
+        return -EINVAL;
+    }
+
     struct flask_csk_slot s = *in;
 
     /* A pair is live only when complete — half-filled drafts stay inert
-     * but echo back as written. */
+     * but echo back as written (mods 0 echoes as Shift). */
     K_SPINLOCK(&cfg_lock) {
         cfg.slots[idx] = s;
         slots_dirty |= BIT(idx);
@@ -255,7 +301,13 @@ int flask_csk_save(void) {
         if (empty && on_flash) {
             err = settings_delete(key);
         } else if (!empty) {
-            err = settings_save_one(key, &slots[i], sizeof(slots[i]));
+            /* Shift/no-flag slots keep the pre-mod-morph 8-byte blob, so a
+             * downgraded image still loads them. */
+            bool legacy = slot_trigger(&slots[i]) == FLASK_CSK_TRIGGER_SHIFT && !slots[i].flags;
+
+            err = settings_save_one(key, &slots[i],
+                                    legacy ? offsetof(struct flask_csk_slot, mods)
+                                           : sizeof(slots[i]));
         }
         if (err) {
             LOG_ERR("%s settings save failed: %d", key, err);
@@ -301,18 +353,23 @@ int flask_csk_settings_restore(const char *sub, size_t len, settings_read_cb rea
 
     if (sub[0] == 's') {
         int idx = atoi(&sub[1]);
-        struct flask_csk_slot s;
+        struct flask_csk_slot s = {0};
 
         if (idx < 0 || idx >= FLASK_CSK_SLOTS) {
             LOG_WRN("flask/csk/%s ignored (bad index)", sub);
             return 0;
         }
-        if (len != sizeof(s)) {
+        /* 8 bytes = pre-mod-morph entry: mods/flags stay 0 = Shift, masked. */
+        if (len != sizeof(s) && len != offsetof(struct flask_csk_slot, mods)) {
             LOG_WRN("flask/csk/%s ignored (len %d)", sub, (int)len);
             return 0;
         }
-        if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
+        if (read_cb(cb_arg, &s, len) < 0) {
             return -EIO;
+        }
+        if ((s.mods & 0xF0) || (s.flags & ~FLASK_CSK_FLAG_KEEP)) {
+            LOG_WRN("flask/csk/%s ignored (bad mods/flags)", sub);
+            return 0;
         }
         K_SPINLOCK(&cfg_lock) {
             cfg.slots[idx] = s;
