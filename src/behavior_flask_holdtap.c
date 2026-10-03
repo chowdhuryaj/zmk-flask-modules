@@ -9,10 +9,12 @@
  * hold-while-undecided, captured-event replay — with ONE change: the four
  * timing values come from a runtime table indexed by the pressed key's
  * position, copied into the active hold-tap at key-down (an edit mid-hold
- * applies from the next press). Everything else (hold/tap behaviors,
- * hold-trigger-key-positions, hold-trigger-on-release, retro-tap,
+ * applies from the next press). The positional rule is also per slot
+ * (0x53): mode 0 keeps the node's hold-trigger-key-positions /
+ * hold-trigger-on-release, other modes replace them at key-down.
+ * Everything else (hold/tap behaviors, retro-tap,
  * hold-while-undecided[-linger]) stays per-node devicetree, exactly like
- * core.
+ * core. A 64-entry RAM log (0x54) records each decision at release.
  *
  * Why a port and not a wrapper: core's config lives in flash (const) and
  * its engine functions are static, so there is no hook to feed it a
@@ -70,9 +72,42 @@
  *       key position (= slot for kind 0, 0xFF for virtual), name ASCII
  *       NUL-padded (bytes 3..28, the defaults child's display-name; may be
  *       empty)].
+ *  0x53 POSITIONAL  payload-addressed, RW:
+ *         [0] slot
+ *         [1] mode  0 compiled (the node's hold-trigger-key-positions and
+ *                     hold-trigger-on-release; boot default)
+ *                   1 off (no positional rule)
+ *                   2 on press: first other key recorded at its PRESS; the
+ *                     decision is forced to TAP unless it is in the map
+ *                   3 on release: same, recorded at its RELEASE (core
+ *                     hold-trigger-on-release semantics)
+ *                   >3 → whole frame 0xFF, nothing applied
+ *         [2..27] trigger map, positions 0..207: position p = byte
+ *                 [2 + (p >> 3)] bit (p & 7). Bits at or past the key
+ *                 position count are dropped on SET and read 0. Modes 2/3
+ *                 with an empty map force TAP on any other key.
+ *       GET fills [1..27] (modes 0/1 return the map last SET). SET applies
+ *       from the slot's next press and echoes the applied values.
+ *  0x54 LOG         RO. GET payload [0..1] = since_seq. Reply:
+ *         [0..1] first_seq (= next_seq when n = 0)  [2] n (0..3)
+ *         [3..26] n x 8-byte entries, oldest first, from the oldest retained
+ *                 entry with seq >= since_seq (wrap-aware; a since older
+ *                 than the 64-entry ring starts at the oldest retained):
+ *                 +0 slot, +1 outcome (bit0 1 = hold; bits1..3 reason:
+ *                 0 flavor on another key, 1 timer, 2 positional forced
+ *                 tap, 3 require-prior-idle, 4 quick-tap, 5 released
+ *                 undecided), +2 first other key pressed while undecided
+ *                 (0xFF none), +3 held_ms u16 (press → release, saturating),
+ *                 +5 other_ms u16 (press → that other press, 0xFFFF none),
+ *                 +7 prior_gap = ms since the last non-modifier keycode press
+ *                 or tapped hold-tap before this press (the clock
+ *                 require-prior-idle reads) / 4, saturating 255
+ *         [27..28] next_seq. Recorded at hold-tap RELEASE, RAM only.
  *  SAVE (cmd 0x09, channel 0x2A): persists every slot that differs from
- *       its default ("flask/holdtap/p<slot>") and deletes saved entries
- *       that were reset. Echo arrives after the flash writes land.
+ *       its default ("flask/holdtap/p<slot>"), every positional rule with
+ *       mode != 0 or a non-zero map ("flask/holdtap/t<slot>"), and deletes
+ *       saved entries that went back to default. Echo arrives after the
+ *       flash writes land.
  * Central-only on splits. Absent module → every 0x2A frame echoes 0xFF.
  * Full contract with byte examples: flask-holdtap-contract.md.
  * ========================================================================
@@ -247,6 +282,118 @@ static struct flask_holdtap_timing timing_for(uint32_t position) {
     return t;
 }
 
+/* --- positional rule per slot (0x53) --- */
+
+BUILD_ASSERT(ZMK_KEYMAP_LEN <= FLASK_HT_POS_MAP_BYTES * 8, "positional map covers 208 positions");
+#define HT_POS_BYTES ((ZMK_KEYMAP_LEN + 7) / 8)
+
+struct ht_pos {
+    uint8_t mode; /* enum flask_holdtap_pos_mode; zero = compiled (boot) */
+    uint8_t map[HT_POS_BYTES];
+};
+
+static struct ht_pos pos_live[HT_SLOTS];
+static bool pos_dirty[HT_SLOTS];
+static bool pos_on_flash[HT_SLOTS];
+
+static struct ht_pos pos_from_wire(const struct flask_holdtap_positional *in) {
+    struct ht_pos p = {.mode = in->mode};
+
+    memcpy(p.map, in->map, HT_POS_BYTES);
+    if (ZMK_KEYMAP_LEN % 8) {
+        p.map[HT_POS_BYTES - 1] &= (1u << (ZMK_KEYMAP_LEN % 8)) - 1;
+    }
+    return p;
+}
+
+static void pos_to_wire(const struct ht_pos *p, struct flask_holdtap_positional *out) {
+    memset(out, 0, sizeof(*out));
+    out->mode = p->mode;
+    memcpy(out->map, p->map, HT_POS_BYTES);
+}
+
+int flask_holdtap_positional_get(uint8_t slot, struct flask_holdtap_positional *out) {
+    struct ht_pos p;
+
+    if (slot >= HT_SLOTS || out == NULL) {
+        return -EINVAL;
+    }
+    K_SPINLOCK(&cfg_lock) { p = pos_live[slot]; }
+    pos_to_wire(&p, out);
+    return 0;
+}
+
+int flask_holdtap_positional_set(uint8_t slot, const struct flask_holdtap_positional *in) {
+    if (slot >= HT_SLOTS || in == NULL || in->mode > FLASK_HT_POS_MODE_MAX) {
+        return -EINVAL;
+    }
+    struct ht_pos p = pos_from_wire(in);
+
+    K_SPINLOCK(&cfg_lock) {
+        pos_live[slot] = p;
+        pos_dirty[slot] = true;
+    }
+    return 0;
+}
+
+static struct ht_pos pos_for(uint32_t position) {
+    struct ht_pos p = {0};
+
+    if (position < HT_SLOTS) {
+        K_SPINLOCK(&cfg_lock) { p = pos_live[position]; }
+    }
+    return p;
+}
+
+static bool pos_custom(const struct ht_pos *p) {
+    if (p->mode != FLASK_HT_POS_COMPILED) {
+        return true;
+    }
+    for (int i = 0; i < HT_POS_BYTES; i++) {
+        if (p->map[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* --- decision log (0x54): RAM ring, wire-layout entries --- */
+
+static uint8_t log_ring[FLASK_HT_LOG_LEN][FLASK_HT_LOG_ENTRY];
+static uint16_t log_next; /* seq the next entry gets; 65536 % LEN == 0, so seq % LEN = index */
+static uint8_t log_count; /* retained entries, saturates at LEN */
+
+static void log_push(const uint8_t *entry) {
+    K_SPINLOCK(&cfg_lock) {
+        memcpy(log_ring[log_next % FLASK_HT_LOG_LEN], entry, FLASK_HT_LOG_ENTRY);
+        log_next++;
+        if (log_count < FLASK_HT_LOG_LEN) {
+            log_count++;
+        }
+    }
+}
+
+/* since is compared wrap-aware (int16 distance): a since older than the
+ * ring starts at the oldest retained entry, one past next_seq returns none. */
+uint8_t flask_holdtap_log_read(uint16_t since, uint8_t max, uint8_t *out, uint16_t *first,
+                               uint16_t *next) {
+    uint8_t n = 0;
+
+    K_SPINLOCK(&cfg_lock) {
+        uint16_t oldest = log_next - log_count;
+        int32_t off = CLAMP((int32_t)(int16_t)(uint16_t)(since - oldest), 0, log_count);
+
+        n = MIN(max, log_count - off);
+        *first = oldest + off;
+        *next = log_next;
+        for (int i = 0; i < n; i++) {
+            memcpy(&out[i * FLASK_HT_LOG_ENTRY],
+                   log_ring[(uint16_t)(*first + i) % FLASK_HT_LOG_LEN], FLASK_HT_LOG_ENTRY);
+        }
+    }
+    return n;
+}
+
 /* --- persistence (settings subtree "flask/holdtap") --- */
 
 struct flask_holdtap_saved {
@@ -255,6 +402,13 @@ struct flask_holdtap_saved {
 } __packed;
 
 #define HT_SETTINGS_VERSION 1
+
+/* "t<slot>": positional rule, fixed 26-byte map so a keymap-size change
+ * does not orphan the entry (bits past the count are dropped on load). */
+struct flask_holdtap_saved_pos {
+    uint8_t version;
+    struct flask_holdtap_positional p;
+} __packed;
 
 int flask_holdtap_save(void) {
     for (int i = 0; i < HT_SLOTS; i++) {
@@ -286,6 +440,63 @@ int flask_holdtap_save(void) {
         }
         on_flash[i] = custom;
     }
+    for (int i = 0; i < HT_SLOTS; i++) {
+        struct flask_holdtap_saved_pos saved = {.version = HT_SETTINGS_VERSION};
+        struct ht_pos p;
+        bool pending, custom;
+
+        K_SPINLOCK(&cfg_lock) {
+            pending = pos_dirty[i];
+            pos_dirty[i] = false;
+            p = pos_live[i];
+        }
+        if (!pending) {
+            continue;
+        }
+        custom = pos_custom(&p);
+        if (!custom && !pos_on_flash[i]) {
+            continue;
+        }
+        pos_to_wire(&p, &saved.p);
+
+        char key[24];
+        int err;
+
+        snprintf(key, sizeof(key), "flask/holdtap/t%d", i);
+        err = custom ? settings_save_one(key, &saved, sizeof(saved)) : settings_delete(key);
+        if (err) {
+            LOG_ERR("%s settings save failed: %d", key, err);
+            K_SPINLOCK(&cfg_lock) { pos_dirty[i] = true; }
+            return err;
+        }
+        pos_on_flash[i] = custom;
+    }
+    return 0;
+}
+
+static int restore_positional(const char *sub, size_t len, settings_read_cb read_cb,
+                              void *cb_arg) {
+    struct flask_holdtap_saved_pos saved;
+    int idx = atoi(&sub[1]);
+
+    if (idx < 0 || idx >= HT_SLOTS || len != sizeof(saved)) {
+        LOG_WRN("flask/holdtap/%s ignored (index/len %d)", sub, (int)len);
+        return 0;
+    }
+    if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+        return -EIO;
+    }
+    if (saved.version != HT_SETTINGS_VERSION || saved.p.mode > FLASK_HT_POS_MODE_MAX) {
+        LOG_WRN("flask/holdtap/%s ignored (version %d)", sub, saved.version);
+        return 0;
+    }
+    struct ht_pos p = pos_from_wire(&saved.p);
+
+    K_SPINLOCK(&cfg_lock) {
+        pos_live[idx] = p;
+        pos_dirty[idx] = false;
+    }
+    pos_on_flash[idx] = true;
     return 0;
 }
 
@@ -293,6 +504,9 @@ int flask_holdtap_settings_restore(const char *sub, size_t len, settings_read_cb
                                    void *cb_arg) {
     struct flask_holdtap_saved saved;
 
+    if (sub != NULL && sub[0] == 't') {
+        return restore_positional(sub, len, read_cb, cb_arg);
+    }
     if (sub == NULL || sub[0] != 'p') {
         return -ENOENT;
     }
@@ -372,11 +586,27 @@ struct active_hold_tap {
     enum status status;
     const struct behavior_hold_tap_config *config;
     struct flask_holdtap_timing timing; /* snapshot at key-down */
+    struct ht_pos pos;                  /* positional rule, snapshot at key-down */
+    /* decision log (0x54) */
+    uint8_t reason;        /* enum ht_why, set when decided */
+    uint8_t prior_gap;     /* (ms since last_tapped) / 4 at key-down, saturating */
+    uint8_t log_other_pos; /* first other key pressed while undecided, 0xFF none */
+    int64_t log_other_ts;
     struct k_work_delayable work;
     bool work_is_cancelled;
 
     // initialized to -1, which is to be interpreted as "no other key has been pressed yet"
     int32_t position_of_first_other_key_pressed;
+};
+
+/* Log reason codes (outcome bits 1..3 on the wire). */
+enum ht_why {
+    HT_WHY_FLAVOR = 0,     /* flavor decided on another key */
+    HT_WHY_TIMER = 1,      /* tapping term expired */
+    HT_WHY_POSITIONAL = 2, /* positional rule forced tap */
+    HT_WHY_PRIOR_IDLE = 3, /* require-prior-idle instant tap */
+    HT_WHY_QUICK_TAP = 4,  /* quick-tap repeat */
+    HT_WHY_RELEASE = 5,    /* released before any decision */
 };
 
 static struct active_hold_tap *undecided_hold_tap = NULL;
@@ -589,8 +819,15 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
 #endif
         active_hold_taps[i].status = STATUS_UNDECIDED;
         active_hold_taps[i].config = config;
-        active_hold_taps[i].timing =
-            timing_for(config->slot >= 0 ? (uint32_t)config->slot : event->position);
+        uint32_t slot = config->slot >= 0 ? (uint32_t)config->slot : event->position;
+        int64_t gap = event->timestamp - last_tapped.timestamp;
+
+        active_hold_taps[i].timing = timing_for(slot);
+        active_hold_taps[i].pos = pos_for(slot);
+        active_hold_taps[i].reason = HT_WHY_RELEASE;
+        active_hold_taps[i].prior_gap =
+            last_tapped.timestamp == INT32_MIN ? 255 : (uint8_t)CLAMP(gap / 4, 0, 255);
+        active_hold_taps[i].log_other_pos = 0xFF;
         active_hold_taps[i].param_hold = param_hold;
         active_hold_taps[i].param_tap = param_tap;
         active_hold_taps[i].timestamp = event->timestamp;
@@ -779,16 +1016,49 @@ static bool is_first_other_key_pressed_trigger_key(struct active_hold_tap *hold_
     return false;
 }
 
+/* Mode 0 = the node's compiled flag; 2/3 override it (mode 1 never reads
+ * the recorded position). */
+static bool trigger_on_release(const struct active_hold_tap *hold_tap) {
+    switch (hold_tap->pos.mode) {
+    case FLASK_HT_POS_ON_PRESS:
+        return false;
+    case FLASK_HT_POS_ON_RELEASE:
+        return true;
+    default:
+        return hold_tap->config->hold_trigger_on_release;
+    }
+}
+
 // Force a tap decision if the positional conditions for a hold decision are not met.
 static void decide_positional_hold(struct active_hold_tap *hold_tap) {
-    if (!(hold_tap->config->hold_trigger_key_positions_len > 0)) {
+    int32_t other = hold_tap->position_of_first_other_key_pressed;
+
+    switch (hold_tap->pos.mode) {
+    case FLASK_HT_POS_OFF:
         return;
+    case FLASK_HT_POS_COMPILED: /* core, unchanged */
+        if (!(hold_tap->config->hold_trigger_key_positions_len > 0)) {
+            return;
+        }
+        if (other == -1) {
+            return;
+        }
+        if (is_first_other_key_pressed_trigger_key(hold_tap)) {
+            return;
+        }
+        break;
+    default: /* runtime map: an empty map forces TAP on any other key */
+        if (other == -1) {
+            return;
+        }
+        if (other >= 0 && other < ZMK_KEYMAP_LEN &&
+            (hold_tap->pos.map[other >> 3] & BIT(other & 7))) {
+            return;
+        }
+        break;
     }
-    if (hold_tap->position_of_first_other_key_pressed == -1) {
-        return;
-    }
-    if (is_first_other_key_pressed_trigger_key(hold_tap)) {
-        return;
+    if (hold_tap->status != STATUS_TAP) {
+        hold_tap->reason = HT_WHY_POSITIONAL;
     }
     hold_tap->status = STATUS_TAP;
 }
@@ -809,6 +1079,13 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
         return;
     }
 
+    uint8_t why = decision_moment == HT_TIMER_EVENT ? HT_WHY_TIMER
+                  : decision_moment == HT_KEY_UP    ? HT_WHY_RELEASE
+                  : decision_moment != HT_QUICK_TAP ? HT_WHY_FLAVOR
+                  : (last_tapped.timestamp + hold_tap->timing.prior_idle_ms) > hold_tap->timestamp
+                      ? HT_WHY_PRIOR_IDLE
+                      : HT_WHY_QUICK_TAP;
+
     switch (hold_tap->timing.flavor) {
     case FLASK_HT_HOLD_PREFERRED:
         decide_hold_preferred(hold_tap, decision_moment);
@@ -827,6 +1104,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
     if (hold_tap->status == STATUS_UNDECIDED) {
         return;
     }
+    hold_tap->reason = why;
 
     decide_positional_hold(hold_tap);
 
@@ -901,6 +1179,31 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
+static uint16_t sat_u16(int64_t v, uint16_t max) { return v < 0 ? 0 : v > max ? max : (uint16_t)v; }
+
+/* 8-byte wire entry: slot, outcome (bit0 hold, bits1..3 reason), other_pos,
+ * held_ms u16 BE, other_ms u16 BE (0xFFFF none), prior_gap. */
+static void log_release(const struct active_hold_tap *hold_tap, int64_t release_ts) {
+    bool hold =
+        hold_tap->status == STATUS_HOLD_TIMER || hold_tap->status == STATUS_HOLD_INTERRUPT;
+    uint16_t held = sat_u16(release_ts - hold_tap->timestamp, 0xFFFF);
+    uint16_t other = hold_tap->log_other_pos == 0xFF
+                         ? 0xFFFF
+                         : sat_u16(hold_tap->log_other_ts - hold_tap->timestamp, 0xFFFE);
+    uint8_t e[FLASK_HT_LOG_ENTRY] = {
+        hold_tap->config->slot >= 0 ? hold_tap->config->slot : hold_tap->position,
+        (uint8_t)(hold | (hold_tap->reason << 1)),
+        hold_tap->log_other_pos,
+        held >> 8,
+        held & 0xFF,
+        other >> 8,
+        other & 0xFF,
+        hold_tap->prior_gap,
+    };
+
+    log_push(e);
+}
+
 static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
                                         struct zmk_behavior_binding_event event) {
     struct active_hold_tap *hold_tap = find_hold_tap(event.position);
@@ -919,6 +1222,7 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
 
     decide_hold_tap(hold_tap, HT_KEY_UP);
     decide_retro_tap(hold_tap);
+    log_release(hold_tap, event.timestamp);
     release_binding(hold_tap);
 
     if (hold_tap->config->hold_while_undecided && hold_tap->config->hold_while_undecided_linger) {
@@ -990,9 +1294,14 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    if ((undecided_hold_tap->config->hold_trigger_on_release != ev->state) &&
+    if ((trigger_on_release(undecided_hold_tap) != ev->state) &&
         (undecided_hold_tap->position_of_first_other_key_pressed == -1)) {
         undecided_hold_tap->position_of_first_other_key_pressed = ev->position;
+    }
+    if (ev->state && undecided_hold_tap->position != ev->position &&
+        undecided_hold_tap->log_other_pos == 0xFF) {
+        undecided_hold_tap->log_other_pos = ev->position;
+        undecided_hold_tap->log_other_ts = ev->timestamp;
     }
 
     if (undecided_hold_tap->position == ev->position) {

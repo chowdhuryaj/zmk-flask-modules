@@ -1,7 +1,8 @@
 /*
- * Runtime API for flask_holdtap — hold-tap timing editable per KEY
- * POSITION (Flask channel 0x2A, proto v17). Wire contract: the comment
- * block at the top of src/behavior_flask_holdtap.c.
+ * Runtime API for flask_holdtap — hold-tap timing and positional rule
+ * editable per KEY POSITION, plus a decision log (Flask channel 0x2A,
+ * proto v17). Wire contract: the comment block at the top of
+ * src/behavior_flask_holdtap.c.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -50,8 +51,40 @@ int flask_holdtap_default_get(uint8_t slot, struct flask_holdtap_timing *out);
  * applied). term_ms == 0 resets the slot to its compiled default. */
 int flask_holdtap_set(uint8_t slot, const struct flask_holdtap_timing *in);
 
-/* Persist via settings subtree "flask/holdtap" ("p<slot>" for each slot
- * that differs from its compiled default). flask_save queue only. */
+/* Positional rule per slot (wire 0x53). mode: */
+enum flask_holdtap_pos_mode {
+    FLASK_HT_POS_COMPILED = 0, /* the node's hold-trigger-key-positions / -on-release */
+    FLASK_HT_POS_OFF = 1,      /* no positional rule */
+    FLASK_HT_POS_ON_PRESS = 2, /* other key recorded at press; TAP unless it is in map */
+    FLASK_HT_POS_ON_RELEASE = 3, /* same, recorded at release */
+};
+#define FLASK_HT_POS_MODE_MAX FLASK_HT_POS_ON_RELEASE
+#define FLASK_HT_POS_MAP_BYTES 26 /* positions 0..207, bit p&7 of byte p>>3 */
+
+/* Exactly the wire bytes [1..27] of a 0x53 frame. */
+struct flask_holdtap_positional {
+    uint8_t mode;
+    uint8_t map[FLASK_HT_POS_MAP_BYTES];
+} __packed;
+
+/* -EINVAL for a bad slot or mode > 3 (nothing applied). Set drops bits at
+ * or past the key-position count; applies from the slot's next press. */
+int flask_holdtap_positional_get(uint8_t slot, struct flask_holdtap_positional *out);
+int flask_holdtap_positional_set(uint8_t slot, const struct flask_holdtap_positional *in);
+
+/* Decision log (wire 0x54): RAM ring of FLASK_HT_LOG_LEN entries recorded at
+ * hold-tap release, FLASK_HT_LOG_ENTRY bytes each in wire layout. Copies up
+ * to `max` entries starting at the oldest retained seq >= since into out,
+ * returns how many; *first = seq of the first copied entry (= *next when
+ * none), *next = seq the next recorded entry will get. */
+#define FLASK_HT_LOG_LEN 64
+#define FLASK_HT_LOG_ENTRY 8
+uint8_t flask_holdtap_log_read(uint16_t since, uint8_t max, uint8_t *out, uint16_t *first,
+                               uint16_t *next);
+
+/* Persist via settings subtree "flask/holdtap" ("p<slot>" timing for each
+ * slot that differs from its compiled default, "t<slot>" positional when
+ * mode != 0 or the map is non-zero). flask_save queue only. */
 int flask_holdtap_save(void);
 
 int flask_holdtap_settings_restore(const char *sub, size_t len, settings_read_cb read_cb,

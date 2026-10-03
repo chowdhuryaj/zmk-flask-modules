@@ -198,6 +198,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * One slot per KEY POSITION plus VIRTUAL slots after them (nodes with
  * `slot = <n>`: combo / macro hold-taps), read at key-down. Core hold-tap timing is const DT, so a per-key timing
  * slider needed its own engine.
+ * Later on v17, no bump (feature-detected, old images echo 0xFF):
+ * positional rule 0x53 [slot, mode 0 compiled / 1 off / 2 on-press /
+ * 3 on-release, trigger map[26]] (SAVE "flask/holdtap/t<slot>") and
+ * decision log 0x54 RO (GET [since u16] -> up to 3 x 8-byte entries).
  * v18 (2026-10-02): runtime adaptive keys channel 0x2B (flask_adaptive —
  * enabled 0x01, set count 0x02 / rule pool size 0x03 / steps per rule 0x04
  * RO, rule header 0x50 payload-addressed [rule, set, trigger u32 BE (0 =
@@ -379,6 +383,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
                       * idle u16 BE, flavor, flags] — term 0 resets */
 #define HT_DEFAULT 0x51 /* RO, same layout: the compiled default */
 #define HT_SLOT_INFO 0x52 /* RO: [slot, kind 0 key / 1 virtual, key pos or 0xFF, name[26]] */
+#define HT_POSITIONAL 0x53 /* payload-addressed: [slot, mode, trigger map[26]] */
+#define HT_LOG 0x54 /* RO: GET [since u16 BE] -> [first_seq u16, n, n x 8-byte entry, next_seq u16] */
 
 /* Leader values (channel 0x19; 0x01 = QMK leaderTimeout, slot frame at
  * 0x50 clear of QMK's u16 table 0x10-0x4D) */
@@ -1102,6 +1108,38 @@ static bool handle_holdtap(uint8_t cmd, uint8_t value_id, uint8_t *payload, size
         }
         payload[1] = key_pos == 0xFF ? 1 : 0;
         payload[2] = key_pos;
+        return true;
+    }
+    case HT_POSITIONAL: {
+        struct flask_holdtap_positional p;
+
+        if (payload_len < 1 + sizeof(p)) {
+            return false;
+        }
+        if (cmd == CMD_SET) {
+            memcpy(&p, &payload[1], sizeof(p));
+            if (flask_holdtap_positional_set(payload[0], &p) != 0) {
+                return false;
+            }
+        }
+        if (flask_holdtap_positional_get(payload[0], &p) != 0) {
+            return false;
+        }
+        memcpy(&payload[1], &p, sizeof(p));
+        return true;
+    }
+    case HT_LOG: {
+        uint16_t first, next;
+        uint8_t n;
+
+        if (cmd != CMD_GET || payload_len < 29) {
+            return false;
+        }
+        memset(&payload[3], 0, 3 * FLASK_HT_LOG_ENTRY);
+        n = flask_holdtap_log_read(rd_u16(payload), 3, &payload[3], &first, &next);
+        wr_u16(payload, first);
+        payload[2] = n;
+        wr_u16(&payload[27], next);
         return true;
     }
     default:
