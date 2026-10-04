@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-description: "Flask runtime mouse-key speed and ramp — scales &mmv / &msc output by a live speed percent and a (t/ramp)^exp ramp (Flask protocol channel 0x2D)"
+description: "Flask runtime mouse-key speed and ramp — scales &mmv / &msc output by a live speed percent and a floor + (1-floor)*(t/ramp)^exp ramp (Flask protocol channel 0x2D)"
 
 compatible: "zmk,input-processor-flask-mousekeys"
 
@@ -21,6 +21,10 @@ properties:
     type: int
     default: 0
     description: "Boot ramp exponent (0 uniform, 1 linear, 2 quadratic, 3 cubic)"
+  floor-pct:
+    type: int
+    default: 0
+    description: "Boot start speed, percent of full speed a movement begins at (0..100; 0 = plain ramp from zero). Pointer instances usually want ~40, scroll 0."
   gap-ms:
     type: int
     default: 60

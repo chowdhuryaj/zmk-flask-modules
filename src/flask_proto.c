@@ -241,8 +241,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * pointer speed % 0x01, ramp ms 0x02, exponent 0x03; scroll 0x11/0x12/0x13;
  * every value a plain u16, SET echoes the clamped value, SAVE via
  * "flask/mousekeys"). Probe = proto >= 20 and GET 0x01 answers.
- * Semantics: include/flask_mousekeys/flask_mousekeys.h. */
-#define FLASK_PROTO_VERSION 20
+ * Semantics: include/flask_mousekeys/flask_mousekeys.h.
+ * v21 (2026-10-04): mouse-key start speed floor on channel 0x2D (pointer
+ * 0x04, scroll 0x14; plain u16 percent 0..100, 0 = plain ramp). SAVE blob
+ * flask/mousekeys is now version 2 (floor appended per kind); version 1
+ * blobs still load and keep the boot floor. Probe = proto >= 21. */
+#define FLASK_PROTO_VERSION 21
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -388,6 +392,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define MK_SPEED 0x01 /* percent of compiled max, 10..400 */
 #define MK_RAMP 0x02  /* ms to full speed, 0..3000 (0 = none) */
 #define MK_EXP 0x03   /* 0 uniform, 1 linear, 2 quadratic, 3 cubic */
+#define MK_FLOOR 0x04 /* start speed, percent of full speed, 0..100 (v21) */
 
 #define SNAP_ENABLED 0x01
 #define SNAP_THRESHOLD 0x02 /* axis dominance percent, 50..99 */
@@ -506,7 +511,15 @@ struct flask_mousekeys_saved {
     struct flask_mousekeys_params params[FLASK_MOUSEKEYS_KINDS];
 } __packed;
 
-#define MOUSEKEYS_SETTINGS_VERSION 1
+#define MOUSEKEYS_SETTINGS_VERSION 2
+
+/* v1 blob (proto v20): no floor. Still accepted on load. */
+struct flask_mousekeys_saved_v1 {
+    uint8_t version;
+    struct {
+        uint16_t speed_pct, ramp_ms, exponent;
+    } params[FLASK_MOUSEKEYS_KINDS];
+} __packed;
 #endif
 
 static void wr_u16(uint8_t *p, uint16_t v) {
@@ -826,6 +839,9 @@ static bool handle_mousekeys(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
         break;
     case MK_EXP:
         slot = &p.exponent;
+        break;
+    case MK_FLOOR:
+        slot = &p.floor_pct;
         break;
     default:
         return false;
@@ -2458,6 +2474,26 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
     if (settings_name_steq(name, "mousekeys", NULL)) {
         struct flask_mousekeys_saved saved;
 
+        if (len == sizeof(struct flask_mousekeys_saved_v1)) {
+            struct flask_mousekeys_saved_v1 old;
+
+            if (read_cb(cb_arg, &old, sizeof(old)) < 0) {
+                return -EIO;
+            }
+            if (old.version != 1) {
+                return 0;
+            }
+            for (uint8_t k = 0; k < FLASK_MOUSEKEYS_KINDS; k++) {
+                struct flask_mousekeys_params tmp;
+
+                flask_mousekeys_params_get(k, &tmp); /* keeps the boot floor */
+                tmp.speed_pct = old.params[k].speed_pct;
+                tmp.ramp_ms = old.params[k].ramp_ms;
+                tmp.exponent = old.params[k].exponent;
+                flask_mousekeys_params_set(k, &tmp);
+            }
+            return 0;
+        }
         if (len != sizeof(saved)) {
             LOG_WRN("flask/mousekeys settings size mismatch (%d != %d)", (int)len,
                     (int)sizeof(saved));

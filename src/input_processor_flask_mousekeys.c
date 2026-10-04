@@ -42,6 +42,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 static atomic_t speed_pct[FLASK_MOUSEKEYS_KINDS] = {ATOMIC_INIT(100), ATOMIC_INIT(100)};
 static atomic_t ramp_ms[FLASK_MOUSEKEYS_KINDS];
 static atomic_t exponent[FLASK_MOUSEKEYS_KINDS];
+static atomic_t floor_pct[FLASK_MOUSEKEYS_KINDS];
 
 int flask_mousekeys_params_get(uint8_t kind, struct flask_mousekeys_params *out) {
     if (out == NULL || kind >= FLASK_MOUSEKEYS_KINDS) {
@@ -50,6 +51,7 @@ int flask_mousekeys_params_get(uint8_t kind, struct flask_mousekeys_params *out)
     out->speed_pct = (uint16_t)atomic_get(&speed_pct[kind]);
     out->ramp_ms = (uint16_t)atomic_get(&ramp_ms[kind]);
     out->exponent = (uint16_t)atomic_get(&exponent[kind]);
+    out->floor_pct = (uint16_t)atomic_get(&floor_pct[kind]);
     return 0;
 }
 
@@ -61,6 +63,7 @@ int flask_mousekeys_params_set(uint8_t kind, const struct flask_mousekeys_params
                CLAMP(in->speed_pct, FLASK_MOUSEKEYS_SPEED_MIN, FLASK_MOUSEKEYS_SPEED_MAX));
     atomic_set(&ramp_ms[kind], MIN(in->ramp_ms, FLASK_MOUSEKEYS_RAMP_MAX));
     atomic_set(&exponent[kind], MIN(in->exponent, FLASK_MOUSEKEYS_EXP_MAX));
+    atomic_set(&floor_pct[kind], MIN(in->floor_pct, FLASK_MOUSEKEYS_FLOOR_MAX));
     return 0;
 }
 
@@ -77,18 +80,19 @@ struct flask_mousekeys_data {
     int32_t remainder[2];
 };
 
-/* min(1, (t/ramp)^exp) in RAMP_ONE units. t < ramp <= 3000 here, so the
- * products stay well inside uint32. */
-static uint32_t ramp_fraction(uint32_t t_ms, uint32_t ramp, uint32_t exp) {
-    if (ramp == 0 || exp == 0 || t_ms >= ramp) {
-        return RAMP_ONE;
-    }
-    uint32_t f = t_ms * RAMP_ONE / ramp;
+/* floor + (1-floor) * min(1, (t/ramp)^exp) in RAMP_ONE units; floor is a
+ * percent 0..100. t < ramp <= 3000 here, so the products stay well inside
+ * uint32 (<= 10000 * 10000 = 1e8; floor term <= 100 * 10000 = 1e6). floor 0
+ * is exactly the plain ramp: 100 * r / 100 == r. */
+static uint32_t ramp_fraction(uint32_t t_ms, uint32_t ramp, uint32_t exp, uint32_t floor) {
     uint32_t r = RAMP_ONE;
-    for (uint32_t i = 0; i < exp; i++) {
-        r = r * f / RAMP_ONE;
+    if (ramp != 0 && exp != 0 && t_ms < ramp) {
+        uint32_t f = t_ms * RAMP_ONE / ramp;
+        for (uint32_t i = 0; i < exp; i++) {
+            r = r * f / RAMP_ONE;
+        }
     }
-    return r;
+    return (floor * RAMP_ONE + (100 - floor) * r) / 100;
 }
 
 static int flask_mousekeys_handle_event(const struct device *dev, struct input_event *event,
@@ -118,7 +122,8 @@ static int flask_mousekeys_handle_event(const struct device *dev, struct input_e
 
     uint32_t t = (uint32_t)MIN(now - data->start_ms, (int64_t)UINT16_MAX);
     uint32_t ramp = ramp_fraction(t, atomic_get(&ramp_ms[cfg->kind]),
-                                  atomic_get(&exponent[cfg->kind]));
+                                  atomic_get(&exponent[cfg->kind]),
+                                  atomic_get(&floor_pct[cfg->kind]));
     int64_t num = (int64_t)event->value * atomic_get(&speed_pct[cfg->kind]) * ramp +
                   data->remainder[axis];
     int64_t scaled = num / (100 * RAMP_ONE);
@@ -151,6 +156,7 @@ static const struct zmk_input_processor_driver_api flask_mousekeys_api = {
                 .speed_pct = DT_INST_PROP(n, speed_pct),                                           \
                 .ramp_ms = DT_INST_PROP(n, ramp_ms),                                               \
                 .exponent = DT_INST_PROP(n, exponent),                                             \
+                .floor_pct = DT_INST_PROP(n, floor_pct),                                           \
             },                                                                                     \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, flask_mousekeys_init, NULL, &flask_mousekeys_data_##n,                \
