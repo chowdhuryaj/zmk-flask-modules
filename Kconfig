@@ -69,6 +69,20 @@ config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE
       ZMK_INPUT_PROCESSOR_FLASK_SCROLL, which is a rate-capped timer-based
       converter with a different feel.
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS := zmk,input-processor-flask-mousekeys
+
+config ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS
+    bool "Flask runtime mouse-key speed and ramp"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Live speed percent and acceleration ramp for &mmv / &msc mouse keys
+      (Flask protocol channel 0x2D, SAVE persists via "flask/mousekeys").
+      ZMK's two-axis ramp is const devicetree config, so the keymap sets
+      time-to-max-speed-ms = <0> and this processor, on each listener's base
+      chain, applies speed_pct/100 * min(1, (t/ramp_ms)^exponent).
+
 DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP := zmk,input-processor-flask-scrollsnap
 
 config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP

@@ -59,6 +59,9 @@
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
 #include <flask_scrollscale/flask_scrollscale.h>
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS)
+#include <flask_mousekeys/flask_mousekeys.h>
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
 #include <flask_rgb/flask_rgb.h>
@@ -233,8 +236,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * modifiers 0x04, repeat 0x05, no-auto-repeat 0x06, retro 0x07, retro limit
  * ms 0x08; every value a plain u16, SET echoes the clamped value, SAVE via
  * "flask/autoshift"). Ships OFF; probe = proto >= 19 and GET 0x02 answers.
- * Wire and semantics: src/flask_autoshift.c. */
-#define FLASK_PROTO_VERSION 19
+ * Wire and semantics: src/flask_autoshift.c.
+ * v20 (2026-10-03): mouse-key speed + ramp channel 0x2D (flask_mousekeys —
+ * pointer speed % 0x01, ramp ms 0x02, exponent 0x03; scroll 0x11/0x12/0x13;
+ * every value a plain u16, SET echoes the clamped value, SAVE via
+ * "flask/mousekeys"). Probe = proto >= 20 and GET 0x01 answers.
+ * Semantics: include/flask_mousekeys/flask_mousekeys.h. */
+#define FLASK_PROTO_VERSION 20
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -266,6 +274,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CH_HOLDTAP 0x2A /* ZMK-line: flask_holdtap (v17) */
 #define CH_ADAPTIVE 0x2B /* ZMK-line: flask_adaptive (v18) */
 #define CH_AUTOSHIFT 0x2C /* ZMK-line: flask_autoshift (v19) */
+#define CH_MOUSEKEYS 0x2D /* ZMK-line: flask_mousekeys (v20) */
 
 /* RGB map values (channel 0x21, QMK NLKB16 wire shape; 0x04-0x08 are
  * imprint-line effect-engine additions, v9 — append-only ids) */
@@ -373,6 +382,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * divisors, NOT an absolute rate: 100 = the benched default, 200 = twice as
  * fast. One knob, both axes, so the base 16:12 ratio survives. */
 #define SCROLLSCALE_SPEED 0x01
+
+/* Channel 0x2D — flask_mousekeys. Low nibble = field, high nibble = kind
+ * (0x0_ pointer, 0x1_ scroll). Plain u16 each. */
+#define MK_SPEED 0x01 /* percent of compiled max, 10..400 */
+#define MK_RAMP 0x02  /* ms to full speed, 0..3000 (0 = none) */
+#define MK_EXP 0x03   /* 0 uniform, 1 linear, 2 quadratic, 3 cubic */
 
 #define SNAP_ENABLED 0x01
 #define SNAP_THRESHOLD 0x02 /* axis dominance percent, 50..99 */
@@ -483,6 +498,15 @@ struct flask_scrollscale_saved {
 } __packed;
 
 #define SCROLLSCALE_SETTINGS_VERSION 1
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS)
+struct flask_mousekeys_saved {
+    uint8_t version;
+    struct flask_mousekeys_params params[FLASK_MOUSEKEYS_KINDS];
+} __packed;
+
+#define MOUSEKEYS_SETTINGS_VERSION 1
 #endif
 
 static void wr_u16(uint8_t *p, uint16_t v) {
@@ -782,6 +806,43 @@ static bool handle_scrollscale(uint8_t cmd, uint8_t value_id, uint8_t *payload) 
     }
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS)
+static bool handle_mousekeys(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    uint8_t kind = value_id >> 4;
+    uint8_t field = value_id & 0x0F;
+    struct flask_mousekeys_params p;
+    uint16_t *slot;
+
+    if (flask_mousekeys_params_get(kind, &p) < 0) {
+        return false;
+    }
+    switch (field) {
+    case MK_SPEED:
+        slot = &p.speed_pct;
+        break;
+    case MK_RAMP:
+        slot = &p.ramp_ms;
+        break;
+    case MK_EXP:
+        slot = &p.exponent;
+        break;
+    default:
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        *slot = rd_u16(payload);
+        flask_mousekeys_params_set(kind, &p);
+        /* re-read so the echo carries the clamped value */
+        flask_mousekeys_params_get(kind, &p);
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+    wr_u16(payload, *slot);
+    return true;
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS */
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_LEADER)
 /* Channel 0x19 — the slot value is a PAYLOAD-ADDRESSED byte frame:
@@ -2021,6 +2082,24 @@ static bool handle_save(uint8_t channel) {
         return true;
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS)
+    case CH_MOUSEKEYS: {
+        struct flask_mousekeys_saved saved = {.version = MOUSEKEYS_SETTINGS_VERSION};
+
+        for (uint8_t k = 0; k < FLASK_MOUSEKEYS_KINDS; k++) {
+            struct flask_mousekeys_params tmp; /* saved is packed: no member pointers */
+
+            flask_mousekeys_params_get(k, &tmp);
+            saved.params[k] = tmp;
+        }
+        int err = settings_save_one("flask/mousekeys", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/mousekeys settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_RGB)
     case CH_RGBMAP:
         return flask_rgb_save() == 0;
@@ -2168,6 +2247,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
         case CH_SCROLLSCALE:
             ok = handle_scrollscale(cmd, value_id, payload);
+            break;
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS)
+        case CH_MOUSEKEYS:
+            ok = handle_mousekeys(cmd, value_id, payload);
             break;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
@@ -2367,6 +2451,30 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
             return 0;
         }
         flask_scrollscale_params_set(&saved.params);
+        return 0;
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS)
+    if (settings_name_steq(name, "mousekeys", NULL)) {
+        struct flask_mousekeys_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/mousekeys settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != MOUSEKEYS_SETTINGS_VERSION) {
+            LOG_WRN("flask/mousekeys settings version %d ignored", saved.version);
+            return 0;
+        }
+        for (uint8_t k = 0; k < FLASK_MOUSEKEYS_KINDS; k++) {
+            struct flask_mousekeys_params tmp = saved.params[k];
+
+            flask_mousekeys_params_set(k, &tmp);
+        }
         return 0;
     }
 #endif

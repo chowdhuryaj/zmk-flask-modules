@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+description: "Flask runtime mouse-key speed and ramp — scales &mmv / &msc output by a live speed percent and a (t/ramp)^exp ramp (Flask protocol channel 0x2D)"
+
+compatible: "zmk,input-processor-flask-mousekeys"
+
+include: ip_zero_param.yaml
+
+properties:
+  scroll:
+    type: boolean
+    description: "Scroll instance (REL_WHEEL/REL_HWHEEL, scroll knobs). Absent = pointer (REL_X/REL_Y)."
+  speed-pct:
+    type: int
+    default: 100
+    description: "Boot speed, percent of the behavior's compiled max (10..400)"
+  ramp-ms:
+    type: int
+    default: 0
+    description: "Boot time to full speed in ms (0..3000; 0 = no ramp)"
+  exponent:
+    type: int
+    default: 0
+    description: "Boot ramp exponent (0 uniform, 1 linear, 2 quadratic, 3 cubic)"
+  gap-ms:
+    type: int
+    default: 60
+    description: "Quiet time after which the next event starts a new movement (ramp restarts). Must exceed the behavior's longest gap between events while held."

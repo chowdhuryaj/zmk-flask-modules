@@ -4,6 +4,11 @@ zephyr_include_directories(include)
 # the role-specific split-sync sources are gated below.
 target_sources_ifdef(CONFIG_ZMK_FLASK_RGB app PRIVATE src/flask_rgb.c)
 
+# flask_mousekeys on BOTH halves: the keymap puts it on the &mmv/&msc
+# listeners, and ZMK compiles input_listener.c wherever the listener node
+# exists, so a peripheral build must be able to link the device too.
+target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_MOUSEKEYS app PRIVATE src/input_processor_flask_mousekeys.c)
+
 if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLL app PRIVATE src/input_processor_flask_scroll.c)
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL app PRIVATE src/input_processor_flask_autoscroll.c)
