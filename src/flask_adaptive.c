@@ -5,9 +5,11 @@
  * (main @ e987227) with the const DT config swapped for a runtime rule
  * table shared by all sets:
  *
- *  - One last-key tracker (zmk_keycode_state_changed, presses only). Modifier
- *    usages never count as the last key; everything else does, including
+ *  - A 2-deep key tracker (last + prev; zmk_keycode_state_changed, presses
+ *    only). Modifier usages never count; everything else does, including
  *    &fak's own outputs and macro playback.
+ *  - Rules with FLASK_AK_FLAG_SKIP match `prev` (the key before the last
+ *    one) instead of `last`; the idle window still runs from `last`.
  *  - `&fak <set>` scans the rules of that set in pool order; first live rule
  *    whose trigger key, modifiers and idle window match wins. No match ->
  *    the set's fallback.
@@ -253,13 +255,14 @@ static bool rule_is_empty(const struct flask_adaptive_rule *r) {
 
 /* --- last-key tracker (event thread only, like urob's globals) --- */
 
-static struct {
+struct ak_key {
     bool valid;
     uint16_t page;
     uint32_t id;
     uint8_t mods;
     int64_t ts;
-} last;
+};
+static struct ak_key last, prev; /* prev = the key before last (skip rules) */
 
 static int ak_keycode_listener(const zmk_event_t *eh) {
     struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
@@ -271,6 +274,7 @@ static int ak_keycode_listener(const zmk_event_t *eh) {
     if (is_mod(ev->usage_page, ev->keycode)) {
         return ZMK_EV_EVENT_BUBBLE;
     }
+    prev = last;
     last.valid = true;
     last.page = ev->usage_page;
     last.id = ev->keycode;
@@ -305,10 +309,15 @@ static uint8_t pick_locked(uint8_t set, int64_t t, struct flask_adaptive_step *s
             if (r->set != set || trig == 0 || r->steps[0].action == FLASK_AK_OUT_NONE) {
                 continue;
             }
-            if (((trig >> 16) & 0xFF) != last.page || (trig & 0xFFFF) != last.id) {
+            const struct ak_key *k = (r->flags & FLASK_AK_FLAG_SKIP) ? &prev : &last;
+
+            if (!k->valid) {
                 continue;
             }
-            if (!mods_ok(trig >> 24, last.mods, (r->flags & FLASK_AK_FLAG_EXACT) != 0)) {
+            if (((trig >> 16) & 0xFF) != k->page || (trig & 0xFFFF) != k->id) {
+                continue;
+            }
+            if (!mods_ok(trig >> 24, k->mods, (r->flags & FLASK_AK_FLAG_EXACT) != 0)) {
                 continue;
             }
             if (idle != 0 && (t - last.ts) > (int64_t)idle) {
@@ -503,7 +512,7 @@ int flask_adaptive_rule_set(uint8_t idx, uint8_t set, uint32_t trigger, uint16_t
     }
     trigger = norm_trigger(trigger);
     max_idle_ms = MIN(max_idle_ms, FLASK_AK_IDLE_MAX_MS);
-    flags &= FLASK_AK_FLAG_EXACT;
+    flags &= FLASK_AK_FLAG_EXACT | FLASK_AK_FLAG_SKIP;
 
     K_SPINLOCK(&cfg_lock) {
         struct flask_adaptive_rule *r = &cfg.rules[idx];
@@ -727,7 +736,7 @@ int flask_adaptive_settings_restore(const char *sub, size_t len, settings_read_c
             }
             r.trigger = norm_trigger(r.trigger);
             r.max_idle_ms = MIN(r.max_idle_ms, FLASK_AK_IDLE_MAX_MS);
-            r.flags &= FLASK_AK_FLAG_EXACT;
+            r.flags &= FLASK_AK_FLAG_EXACT | FLASK_AK_FLAG_SKIP;
             for (int s = 0; s < FLASK_ADAPTIVE_STEPS; s++) {
                 if (r.steps[s].action > FLASK_AK_OUT_MAX) {
                     r.steps[s].action = FLASK_AK_OUT_NONE;

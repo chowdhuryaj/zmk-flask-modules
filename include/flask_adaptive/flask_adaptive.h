@@ -50,6 +50,7 @@ struct flask_adaptive_step {
 } __packed;
 
 #define FLASK_AK_FLAG_EXACT 0x01 /* urob strict-modifiers */
+#define FLASK_AK_FLAG_SKIP 0x02  /* rule matches the key before the last one */
 #define FLASK_AK_IDLE_MAX_MS 10000
 
 /* Trigger = ZMK keymap encoding: usage id bits 0-15, page bits 16-23
@@ -75,7 +76,7 @@ int flask_adaptive_rule_get(uint8_t idx, struct flask_adaptive_rule *out);
 
 /* Header write. trigger 0 deletes the rule (all fields and steps zeroed,
  * `set` is not checked); otherwise set must be < SETS. Normalizes (page
- * 0 -> 7, idle clamped, flags bit0 only). -EINVAL on a bad index / set. */
+ * 0 -> 7, idle clamped, flags bits 0-1 only). -EINVAL on a bad index / set. */
 int flask_adaptive_rule_set(uint8_t idx, uint8_t set, uint32_t trigger, uint16_t max_idle_ms,
                             uint8_t flags);
 

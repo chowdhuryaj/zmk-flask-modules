@@ -212,7 +212,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * v18 (2026-10-02): runtime adaptive keys channel 0x2B (flask_adaptive —
  * enabled 0x01, set count 0x02 / rule pool size 0x03 / steps per rule 0x04
  * RO, rule header 0x50 payload-addressed [rule, set, trigger u32 BE (0 =
- * delete the rule), max idle ms u16 BE, flags (bit0 = exact mods)], rule
+ * delete the rule), max idle ms u16 BE, flags (bit0 = exact mods, bit1 = skip: match the
+ * second-to-last key)], rule
  * step 0x51 [rule, step, action, behavior u16 BE, p1 u32 BE, p2 u32 BE]
  * (the tap-dance step frame), set fallback 0x52 [set, action, behavior u16
  * BE, p1 u32 BE, p2 u32 BE]; SAVE via "flask/adaptive"). `&fak <set>`
@@ -427,7 +428,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define AK_RULE_COUNT 0x03 /* RO — rule pool size */
 #define AK_STEP_COUNT 0x04 /* RO — steps per rule */
 #define AK_RULE 0x50       /* payload-addressed: [rule, set, trigger u32 BE (0 = delete),
-                            * max idle u16 BE, flags (bit0 exact mods)] */
+                            * max idle u16 BE, flags (bit0 exact mods, bit1 skip)] */
 #define AK_STEP 0x51       /* payload-addressed: [rule, step, action, behavior u16 BE,
                             * p1 u32 BE, p2 u32 BE] */
 #define AK_FALLBACK 0x52   /* payload-addressed: [set, action, behavior u16 BE,
