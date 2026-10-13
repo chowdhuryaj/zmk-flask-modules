@@ -18,11 +18,14 @@
 
 int64_t stub_now = 1000;
 static char out_log[512];
+static char full_log[16384]; /* never cleared: the balance check at the end reads it */
 
 static void log_out(const char *fmt, uint32_t v) {
     size_t n = strlen(out_log);
 
     snprintf(out_log + n, sizeof(out_log) - n, fmt, v);
+    n = strlen(full_log);
+    snprintf(full_log + n, sizeof(full_log) - n, fmt, v);
 }
 
 void raise_zmk_keycode_state_changed_from_encoded(uint32_t kc, bool pressed, int64_t ts) {
@@ -269,6 +272,220 @@ int main(void) {
           flask_tapdance_settings_restore("s7", 7, read_buf, saved_buf) == 0 &&
               (flask_tapdance_slot_get(7, &s), s.term_ms == 0),
           "");
+
+    /* ---- extra paths ---- */
+    /* slot helpers: len-1 slots 8,12..15 (taps 50,52..55), 2-tap slots 10,11 (30,31 / 40,41) */
+    const uint8_t one[] = {8, 12, 13, 14, 15};
+    int rc;
+
+    for (int i = 0; i < 5; i++) {
+        set_out(one[i], 0, false, FLASK_TD_OUT_USAGE, 0, one[i] == 8 ? 50 : 40 + one[i]);
+    }
+    set_out(10, 0, false, FLASK_TD_OUT_USAGE, 0, 30);
+    set_out(10, 1, false, FLASK_TD_OUT_USAGE, 0, 31);
+    set_out(11, 0, false, FLASK_TD_OUT_USAGE, 0, 40);
+    set_out(11, 1, false, FLASK_TD_OUT_USAGE, 0, 41);
+
+    idle();
+    td_down(1); td_up(1); td_down(1); advance(100);
+    other_down();
+    expect("at_max interrupt = tap, key down", "+8 +99 ");
+    advance(1000);
+    expect("at_max interrupt: timer stopped", "");
+    td_up(1); other_up();
+    expect("at_max interrupt: released once", "-8 -99 ");
+
+    idle();
+    other_down(); other_up(); advance(100); td_down(2);
+    expect("bypass held", "+99 -99 +9 ");
+    other_down();
+    expect("interrupt of held bypass: no refire", "+99 ");
+    advance(1000);
+    td_up(2);
+    expect("bypass release once", "-9 ");
+    other_up();
+    expect("bypass interrupt other release", "-99 ");
+
+    idle();
+    td_down(0); td_up(0);
+    other_down();
+    expect("interrupt after dance key released", "+4 -4 +99 ");
+    other_up();
+    advance(1000);
+    expect("no late refire", "-99 ");
+
+    idle();
+    td_down(10);
+    td_down(11);
+    expect("two dances: 2nd press resolves 1st", "+30 ");
+    td_up(10);
+    expect("two dances: 1st release", "-30 ");
+    advance(200);
+    expect("two dances: 2nd timer = tap", "+40 ");
+    td_up(11);
+    expect("two dances: 2nd release", "-40 ");
+    idle();
+    td_down(10); td_up(10); td_down(11); td_up(11);
+    expect("two dances: 1st resolved on 2nd", "+30 -30 ");
+    advance(200);
+    expect("two dances: 2nd times out", "+40 -40 ");
+
+    idle();
+    for (int i = 0; i < 5; i++) {
+        position(one[i], true);
+        rc = flask_tapdance_pressed(one[i], one[i], stub_now);
+        check("TD_MAX_HELD slot rc", i < TD_MAX_HELD ? rc == 0 : rc == -ENOMEM, "");
+    }
+    expect("5th simultaneous dance dropped", "+50 +52 +53 +54 ");
+    for (int i = 0; i < 5; i++) {
+        position(one[i], false);
+        flask_tapdance_released(one[i], one[i], stub_now);
+    }
+    expect("releases mirror presses, 5th none", "-50 -52 -53 -54 ");
+    td_down(15); td_up(15);
+    expect("5th key works once a slot frees", "+55 -55 ");
+
+    /* rewrite mid-dance */
+    idle();
+    td_down(13);
+    set_out(13, 0, false, FLASK_TD_OUT_NONE, 0, 0);
+    td_up(13);
+    expect("tap removed while held", "+53 -53 ");
+    set_out(13, 0, false, FLASK_TD_OUT_USAGE, 0, 53);
+    td_down(13);
+    set_out(13, 0, false, FLASK_TD_OUT_USAGE, 0, 77);
+    td_up(13);
+    expect("tap changed while held", "+53 -53 ");
+    set_out(13, 0, false, FLASK_TD_OUT_USAGE, 0, 53);
+
+    idle();
+    td_down(0); advance(200);
+    expect("hold fired", "+20 ");
+    set_out(0, 0, true, FLASK_TD_OUT_USAGE, 0, 25);
+    advance(300); td_up(0);
+    expect("hold changed while held, old released", "-20 ");
+    td_down(0); advance(200);
+    expect("changed hold used next time", "+25 ");
+    set_out(0, 0, true, FLASK_TD_OUT_NONE, 0, 0);
+    td_up(0);
+    expect("hold removed while held", "-25 ");
+    td_down(0); advance(200);
+    expect("removed hold falls back to tap", "+4 ");
+    td_up(0);
+    expect("removed hold release", "-4 ");
+    set_out(0, 0, true, FLASK_TD_OUT_USAGE, 0, 20);
+
+    idle();
+    td_down(1);
+    set_out(1, 0, false, FLASK_TD_OUT_NONE, 0, 0);
+    set_out(1, 1, false, FLASK_TD_OUT_NONE, 0, 0);
+    set_out(1, 1, true, FLASK_TD_OUT_NONE, 0, 0);
+    advance(200);
+    td_up(1);
+    expect("slot emptied mid-dance: nothing, no crash", "");
+    td_down(1); td_up(1); advance(300);
+    expect("emptied slot stays inert", "");
+    set_out(1, 0, false, FLASK_TD_OUT_USAGE, 0, 7);
+    set_out(1, 1, false, FLASK_TD_OUT_USAGE, 0, 8);
+    set_out(1, 1, true, FLASK_TD_OUT_USAGE, 0, 24);
+    td_down(1); td_up(1); advance(200);
+    expect("slot refilled, dance fresh", "+7 -7 ");
+
+    idle();
+    td_down(1); td_up(1); td_down(1);
+    set_out(1, 1, false, FLASK_TD_OUT_NONE, 0, 0); /* len shrinks 2 -> 1 under count 2 */
+    set_out(1, 1, true, FLASK_TD_OUT_NONE, 0, 0);
+    td_up(1);
+    expect("len shrinks mid-dance: clamps to tap 1", "+7 -7 ");
+    set_out(1, 1, false, FLASK_TD_OUT_USAGE, 0, 8);
+    set_out(1, 1, true, FLASK_TD_OUT_USAGE, 0, 24);
+
+    /* term / prior idle clamps */
+    idle();
+    flask_tapdance_term_set(10, 10);
+    flask_tapdance_slot_get(10, &s);
+    check("term 10 clamps to 50", s.term_ms == 50, "");
+    td_down(10); td_up(10); advance(49);
+    expect("term 50: not yet at 49", "");
+    advance(1);
+    expect("term 50: resolves at 50", "+30 -30 ");
+    flask_tapdance_term_set(11, 5000);
+    flask_tapdance_slot_get(11, &s);
+    check("term 5000 clamps to 1000", s.term_ms == 1000, "");
+    td_down(11); td_up(11); advance(999);
+    expect("term 1000: not yet at 999", "");
+    advance(1);
+    expect("term 1000: resolves at 1000", "+40 -40 ");
+    flask_tapdance_term_set(11, 0);
+    flask_tapdance_slot_get(11, &s);
+    check("term 0 stored as 0 (default)", s.term_ms == 0, "");
+    td_down(11); td_up(11); advance(199);
+    expect("term 0: nothing at 199", "");
+    advance(1);
+    expect("term 0: default 200", "+40 -40 ");
+    flask_tapdance_term_set(10, 0);
+    flask_tapdance_prior_idle_set(2, 5000);
+    flask_tapdance_slot_get(2, &s);
+    check("prior idle 5000 clamps to 1000", s.prior_idle_ms == 1000, "");
+    idle();
+    other_down(); other_up(); advance(999); td_down(2);
+    expect("prior idle 1000: bypass at 999", "+99 -99 +9 ");
+    td_up(2);
+    expect("prior idle 1000: release", "-9 ");
+    flask_tapdance_prior_idle_set(2, 150);
+
+    /* quick re-press after resolution starts fresh */
+    idle();
+    td_down(0); td_up(0); advance(200);
+    expect("repress: first single tap", "+4 -4 ");
+    td_down(0); td_up(0); advance(199);
+    expect("repress: waits fresh term", "");
+    advance(1);
+    expect("repress: single again, not double", "+4 -4 ");
+    td_down(0); advance(200); td_up(0);
+    expect("repress: hold", "+20 -20 ");
+    td_down(0); advance(200);
+    expect("repress after hold: hold again, not count 2", "+20 ");
+    td_up(0);
+    expect("repress hold release", "-20 ");
+    td_down(8); td_up(8); td_down(8); td_up(8);
+    expect("repress after max-fast: fresh", "+50 -50 +50 -50 ");
+
+    /* balance: every +X has a later -X */
+    idle();
+    {
+        char buf[sizeof(full_log)];
+        char *tok, *save;
+        char names[128][24];
+        int cnt[128] = {0}, n = 0;
+        bool ok = true;
+
+        strcpy(buf, full_log);
+        for (tok = strtok_r(buf, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
+            int k;
+
+            for (k = 0; k < n && strcmp(names[k], tok + 1); k++) {}
+            if (k == n) {
+                snprintf(names[n++], sizeof(names[0]), "%s", tok + 1);
+            }
+            cnt[k] += tok[0] == '+' ? 1 : -1;
+            if (cnt[k] < 0 || cnt[k] > 1) {
+                ok = false;
+                printf("  unbalanced at %s%s\n", tok[0] == '+' ? "+" : "-", names[k]);
+            }
+        }
+        for (int k = 0; k < n; k++) {
+            if (cnt[k] != 0) {
+                ok = false;
+                printf("  stuck: %s (%d)\n", names[k], cnt[k]);
+            }
+        }
+        check("whole log balanced (+N before -N, none stuck)", ok, "");
+        for (int i = 0; i < TD_MAX_HELD; i++) {
+            ok = ok && dances[i].position == TD_POSITION_FREE && !dances[i].release_timer.pending;
+        }
+        check("no dance or timer left active", ok, "");
+    }
 
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails != 0;
