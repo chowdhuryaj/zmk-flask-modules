@@ -4,6 +4,7 @@
 #include <zmk/event_manager.h>
 struct zmk_keycode_state_changed {
     zmk_event_t header;
+    uint16_t usage_page;
     uint32_t keycode;
     bool state;
     int64_t timestamp;

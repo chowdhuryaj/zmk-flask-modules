@@ -43,6 +43,7 @@
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/behavior.h>
+#include <zmk/hid.h>
 #include <zmk/keymap.h>
 
 #include <flask_tapdance/flask_tapdance.h>
@@ -340,7 +341,9 @@ static int td_listener(const zmk_event_t *eh) {
     struct zmk_keycode_state_changed *kc = as_zmk_keycode_state_changed(eh);
 
     if (kc != NULL) {
-        if (kc->state) {
+        /* Modifiers never count (as flask_adaptive): a held Ctrl or a
+         * hold-tap's mod must not turn the next dance into a bypass. */
+        if (kc->state && !is_mod(kc->usage_page, kc->keycode)) {
             last_keycode_press = kc->timestamp;
         }
         return ZMK_EV_EVENT_BUBBLE;

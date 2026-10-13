@@ -26,7 +26,7 @@ static void log_out(const char *fmt, uint32_t v) {
 }
 
 void raise_zmk_keycode_state_changed_from_encoded(uint32_t kc, bool pressed, int64_t ts) {
-    struct zmk_keycode_state_changed ev = {{STUB_EV_KEYCODE}, kc, pressed, ts};
+    struct zmk_keycode_state_changed ev = {{STUB_EV_KEYCODE}, (uint16_t)(kc >> 16), kc & 0xFFFF, pressed, ts};
 
     log_out(pressed ? "+%u " : "-%u ", kc);
     stub_listener_flask_tapdance(&ev.header); /* real ZMK: tapdance hears its own outputs too */
@@ -209,8 +209,23 @@ int main(void) {
     other_down(); other_up(); advance(150); td_down(2);
     expect("no bypass at prior_idle ms", "+99 -99 ");
     td_up(2); advance(50); td_down(2);
-    expect("no bypass mid-dance (max count)", "+10 ");
+    expect("max count after no-bypass start", "+10 ");
     td_up(2);
+    idle();
+    td_down(2); td_up(2);
+    raise_zmk_keycode_state_changed_from_encoded(99, true, stub_now);
+    raise_zmk_keycode_state_changed_from_encoded(99, false, stub_now);
+    advance(50); td_down(2);
+    expect("no bypass mid-dance", "+99 -99 +10 ");
+    td_up(2);
+    idle();
+    raise_zmk_keycode_state_changed_from_encoded(0x000700E0, true, stub_now);
+    advance(50); td_down(2);
+    expect("held modifier does not bypass", "+458976 ");
+    td_up(2); advance(50); td_down(2);
+    expect("dance continues under a held mod", "+10 ");
+    td_up(2);
+    raise_zmk_keycode_state_changed_from_encoded(0x000700E0, false, stub_now);
     idle();
     other_down(); other_up(); advance(10); td_down(0);
     expect("prior_idle 0 = bypass off", "+99 -99 ");
