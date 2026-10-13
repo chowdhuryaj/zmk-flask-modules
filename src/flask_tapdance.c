@@ -20,6 +20,9 @@
  *  - Fast-typing bypass (prior_idle_ms > 0): a fresh dance pressed within
  *    prior_idle_ms of the last keycode press resolves at once as tap 1,
  *    so a dance on a letter key does not lag mid-word.
+ *  - After-release window (release_ms > 0): releasing while more taps are
+ *    possible pulls the deadline in to release + release_ms if that is
+ *    earlier; the next press re-arms the full term as usual.
  *  - Fire data is copied out of the slot at resolve time — the table can
  *    be rewritten mid-hold and the release must mirror the press.
  *
@@ -59,6 +62,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_TERM_MAX_MS 1000
 #define TD_TERM_DEFAULT_MS 200
 #define TD_PRIOR_IDLE_MAX_MS 1000
+#define TD_RELEASE_MAX_MS 1000
 
 #define TD_MAX_HELD 4
 #define TD_POSITION_FREE UINT32_MAX
@@ -337,6 +341,18 @@ int flask_tapdance_released(uint8_t slot, uint32_t position, int64_t timestamp) 
         /* Last count with a hold, released before the term: a tap. */
         stop_timer(d);
         press_dance(d, false, timestamp);
+    } else if (!d->decided) {
+        uint16_t window;
+
+        K_SPINLOCK(&cfg_lock) { window = cfg.slots[d->slot].release_ms; }
+        if (window && timestamp + window < d->release_at) {
+            /* After-release window: resolve sooner, never later. */
+            d->release_at = timestamp + window;
+
+            int32_t ms_left = d->release_at - k_uptime_get();
+
+            k_work_reschedule(&d->release_timer, ms_left > 0 ? K_MSEC(ms_left) : K_NO_WAIT);
+        }
     }
     if (d->decided) {
         release_dance(d, timestamp);
@@ -441,6 +457,17 @@ int flask_tapdance_prior_idle_set(uint8_t idx, uint16_t prior_idle_ms) {
     return 0;
 }
 
+int flask_tapdance_release_set(uint8_t idx, uint16_t release_ms) {
+    if (idx >= FLASK_TAPDANCE_SLOTS) {
+        return -EINVAL;
+    }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.slots[idx].release_ms = MIN(release_ms, TD_RELEASE_MAX_MS);
+        slots_dirty |= BIT64(idx);
+    }
+    return 0;
+}
+
 int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
                               const struct flask_tapdance_output *in) {
     if (idx >= FLASK_TAPDANCE_SLOTS || tap >= FLASK_TAPDANCE_TAPS || in == NULL) {
@@ -496,8 +523,22 @@ struct flask_tapdance_slot_v1 {
     struct flask_tapdance_output taps[FLASK_TAPDANCE_TAPS];
 } __packed;
 
+/* v22 slot blob: no release_ms (window off). Same upgrade path. */
+struct flask_tapdance_slot_v2 {
+    uint16_t term_ms;
+    uint16_t prior_idle_ms;
+    struct flask_tapdance_output taps[FLASK_TAPDANCE_TAPS];
+    struct flask_tapdance_output holds[FLASK_TAPDANCE_TAPS];
+} __packed;
+
+/* Sizes 2+11N, 4+22N, 6+22N never coincide (N >= 1), so len picks the layout. */
+BUILD_ASSERT(sizeof(struct flask_tapdance_slot_v1) != sizeof(struct flask_tapdance_slot) &&
+                 sizeof(struct flask_tapdance_slot_v2) != sizeof(struct flask_tapdance_slot) &&
+                 sizeof(struct flask_tapdance_slot_v1) != sizeof(struct flask_tapdance_slot_v2),
+             "tap dance slot blob sizes must differ");
+
 static bool slot_is_empty(const struct flask_tapdance_slot *s) {
-    if (s->term_ms != 0 || s->prior_idle_ms != 0) {
+    if (s->term_ms != 0 || s->prior_idle_ms != 0 || s->release_ms != 0) {
         return false;
     }
     for (int t = 0; t < FLASK_TAPDANCE_TAPS; t++) {
@@ -611,6 +652,17 @@ int flask_tapdance_settings_restore(const char *sub, size_t len, settings_read_c
             s.term_ms = old.term_ms;
             memcpy(s.taps, old.taps, sizeof(s.taps));
             migrated = true;
+        } else if (len == sizeof(struct flask_tapdance_slot_v2)) {
+            struct flask_tapdance_slot_v2 old;
+
+            if (read_cb(cb_arg, &old, sizeof(old)) < 0) {
+                return -EIO;
+            }
+            s.term_ms = old.term_ms;
+            s.prior_idle_ms = old.prior_idle_ms;
+            memcpy(s.taps, old.taps, sizeof(s.taps));
+            memcpy(s.holds, old.holds, sizeof(s.holds));
+            migrated = true;
         } else if (len == sizeof(s)) {
             if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
                 return -EIO;
@@ -629,6 +681,9 @@ int flask_tapdance_settings_restore(const char *sub, size_t len, settings_read_c
         }
         if (s.prior_idle_ms > TD_PRIOR_IDLE_MAX_MS) {
             s.prior_idle_ms = TD_PRIOR_IDLE_MAX_MS;
+        }
+        if (s.release_ms > TD_RELEASE_MAX_MS) {
+            s.release_ms = TD_RELEASE_MAX_MS;
         }
         K_SPINLOCK(&cfg_lock) {
             cfg.slots[idx] = s;

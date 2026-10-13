@@ -18,6 +18,9 @@
  * hold waits for release/term instead of resolving at press. Fast-typing
  * bypass: with prior_idle_ms > 0, a fresh dance starting within that many
  * ms of the last keycode press fires tap 1 at once (held until release).
+ * v23: after-release window — with release_ms > 0, releasing the key while
+ * more taps are possible resolves at min(press deadline, release +
+ * release_ms), so a finished tap fires sooner. Never later than before.
  *
  * Outputs are typed like combos v12: encoded HID usage, flask_macros
  * slot, or any Studio-addressable behavior by local id with two params —
@@ -30,7 +33,9 @@
  * BE, p1 u32 BE, p2 u32 BE] (tap bit 7 = the HOLD output of tap index
  * tap & 0x7F, v22), per-slot config 0x51 payload-addressed [slot, term
  * u16 BE], per-slot prior idle 0x52 payload-addressed [slot, ms u16 BE]
- * (0 = off, clamp 1000, v22). Central-only on splits.
+ * (0 = off, clamp 1000, v22), per-slot after-release window 0x53
+ * payload-addressed [slot, ms u16 BE] (0 = off, clamp 1000, v23).
+ * Central-only on splits.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -66,10 +71,13 @@ struct flask_tapdance_output {
  * per tap count (index 0 = single tap). The dance length is the contiguous
  * configured prefix of taps[] — the first NONE tap ends it (core tap-dance
  * "behavior_count"); holds[i] past the length is ignored. Saved as-is
- * (v1 blobs were term + taps only; restore migrates them). */
+ * (v1 blobs were term + taps, v2 lacked release_ms; restore upgrades them). */
 struct flask_tapdance_slot {
     uint16_t term_ms;
     uint16_t prior_idle_ms; /* 0 = no fast-typing bypass */
+    /* After-release window: a release with more taps possible pulls the
+     * deadline in to release + release_ms (never later). 0 = off. */
+    uint16_t release_ms;
     struct flask_tapdance_output taps[FLASK_TAPDANCE_TAPS];
     struct flask_tapdance_output holds[FLASK_TAPDANCE_TAPS];
 } __packed;
@@ -83,6 +91,7 @@ uint8_t flask_tapdance_tap_count(void);
 int flask_tapdance_slot_get(uint8_t idx, struct flask_tapdance_slot *out);
 int flask_tapdance_term_set(uint8_t idx, uint16_t term_ms);
 int flask_tapdance_prior_idle_set(uint8_t idx, uint16_t prior_idle_ms);
+int flask_tapdance_release_set(uint8_t idx, uint16_t release_ms);
 /* hold = false sets taps[tap], true sets holds[tap]. */
 int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
                               const struct flask_tapdance_output *in);

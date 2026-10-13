@@ -253,8 +253,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * idle [slot, ms u16 BE] (fast-typing bypass, 0 = off, clamp 1000), and
  * &fak is accepted as a dance output (&ftd still refused). Slot blobs grow
  * (holds + prior idle); old-size blobs load with no holds and are rewritten
- * on the next SAVE. Probe = proto >= 22. */
-#define FLASK_PROTO_VERSION 22
+ * on the next SAVE. Probe = proto >= 22.
+ * v23 (2026-10-13): tap dance after-release window, channel 0x28 value 0x53
+ * [slot, release_ms u16 BE] (0 = off, clamp 1000): a release while more taps
+ * are possible resolves at min(press deadline, release + release_ms). Slot
+ * blobs grow by 2 bytes; v22 and older blobs load with the window off and
+ * are rewritten on the next SAVE. Probe = proto >= 23. */
+#define FLASK_PROTO_VERSION 23
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -430,6 +435,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_STEP_HOLD 0x80
 #define TD_CFG 0x51  /* payload-addressed: [slot, term u16 BE (0 = default 200)] */
 #define TD_PRIOR_IDLE 0x52 /* payload-addressed: [slot, ms u16 BE (0 = off)] (v22) */
+#define TD_RELEASE 0x53    /* payload-addressed: [slot, release_ms u16 BE (0 = off)] (v23) */
 
 /* Adaptive key values (channel 0x2B, ZMK line) */
 #define AK_ENABLED 0x01
@@ -1008,7 +1014,8 @@ static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t p
 #if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
 /* Channel 0x28 — step frame [slot, tap, action, behavior u16 BE, p1 u32
  * BE, p2 u32 BE] (tap bit 7 = hold output); per-slot config frames [slot,
- * term u16 BE] and [slot, prior idle u16 BE]. Address bytes echo untouched. */
+ * term u16 BE], [slot, prior idle u16 BE] and [slot, release ms u16 BE].
+ * Address bytes echo untouched. */
 static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
     switch (value_id) {
     case TD_ENABLED:
@@ -1107,6 +1114,24 @@ static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, siz
         }
         payload[1] = s.prior_idle_ms >> 8;
         payload[2] = s.prior_idle_ms;
+        return true;
+    }
+    case TD_RELEASE: {
+        if (payload_len < 1 + 2) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_tapdance_slot s;
+
+        if (cmd == CMD_SET &&
+            flask_tapdance_release_set(slot, ((uint16_t)payload[1] << 8) | payload[2]) != 0) {
+            return false;
+        }
+        if (flask_tapdance_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        payload[1] = s.release_ms >> 8;
+        payload[2] = s.release_ms;
         return true;
     }
     default:

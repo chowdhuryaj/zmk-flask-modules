@@ -142,7 +142,7 @@ int main(void) {
     struct flask_tapdance_slot s;
 
     sys_init_flask_tapdance_init();
-    assert(sizeof(struct flask_tapdance_slot) == 4 + 2 * FLASK_TAPDANCE_TAPS * 11);
+    assert(sizeof(struct flask_tapdance_slot) == 6 + 2 * FLASK_TAPDANCE_TAPS * 11);
 
     /* slot 0: taps 4,5,6; holds on counts 1,2 (20, 21); count 3 none = fast path */
     set_out(0, 0, false, FLASK_TD_OUT_USAGE, 0, 4);
@@ -511,6 +511,63 @@ int main(void) {
     expect("own output still stamps the press time", "+9 -9 +9 ");
     td_up(2);
     expect("own output stamp: release", "-9 ");
+
+    /* After-release window (slot 0: taps 4,5,6, holds 20,21, term 200). */
+    idle();
+    td_down(0); advance(20); td_up(0); advance(179);
+    expect("window 0: waits the press term", "");
+    advance(1);
+    expect("window 0: resolves at press + term", "+4 -4 ");
+    flask_tapdance_release_set(0, 80);
+    idle();
+    td_down(0); advance(20); td_up(0); advance(79);
+    expect("window: waits release + 80", "");
+    advance(1);
+    expect("window: resolves at release + 80", "+4 -4 ");
+    idle();
+    td_down(0); advance(150); td_up(0); advance(49);
+    expect("window: press deadline kept if earlier", "");
+    advance(1);
+    expect("window: resolves at press + term", "+4 -4 ");
+    idle();
+    td_down(0); advance(20); td_up(0); advance(60); td_down(0); advance(20); td_up(0);
+    advance(79);
+    expect("window: double tap inside it counts", "");
+    advance(1);
+    expect("window: double tap at release + 80", "+5 -5 ");
+    idle();
+    td_down(0); advance(199);
+    expect("window: tap-hold before term", "");
+    advance(1);
+    expect("window: tap-hold still holds", "+20 ");
+    advance(100); td_up(0);
+    expect("window: hold release", "-20 ");
+    flask_tapdance_release_set(0, 5000);
+    flask_tapdance_slot_get(0, &s);
+    check("window clamps to 1000", s.release_ms == 1000, "");
+    flask_tapdance_release_set(0, 0);
+
+    /* v2 blob (v22): term + prior idle + taps + holds, no release_ms */
+    {
+        uint8_t v2[4 + 2 * FLASK_TAPDANCE_TAPS * 11] = {0};
+        struct flask_tapdance_output h = {.action = FLASK_TD_OUT_USAGE, .param1 = 20};
+        uint16_t v2_term = 250, v2_idle = 100;
+        char v2_got[64];
+
+        memcpy(v2, &v2_term, 2);
+        memcpy(v2 + 2, &v2_idle, 2);
+        memcpy(v2 + 4, &o, sizeof(o));
+        memcpy(v2 + 4 + FLASK_TAPDANCE_TAPS * 11, &h, sizeof(h));
+        assert(flask_tapdance_settings_restore("s9", sizeof(v2), read_buf, v2) == 0);
+        flask_tapdance_slot_get(9, &s);
+        bool up = s.term_ms == 250 && s.prior_idle_ms == 100 && s.release_ms == 0 &&
+                  s.taps[0].param1 == 4 && s.holds[0].param1 == 20 && (slots_dirty & BIT64(9));
+        slots_dirty = BIT64(9);
+        flask_tapdance_save();
+        up = up && strcmp(saved_key, "flask/tapdance/s9") == 0 && saved_len == sizeof(s);
+        snprintf(v2_got, sizeof(v2_got), "%zu -> %zu bytes", sizeof(v2), saved_len);
+        check("v2 blob upgrades, SAVE rewrites it", up, v2_got);
+    }
 
     /* balance: every +X has a later -X */
     idle();
