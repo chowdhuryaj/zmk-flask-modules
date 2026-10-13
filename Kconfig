@@ -263,8 +263,9 @@ config ZMK_FLASK_TAPDANCE
     help
       Runtime-editable tap dances (channel 0x28): the &ftd behavior runs a
       slot's dance — core zmk,behavior-tap-dance semantics with the const
-      DT config swapped for a live-editable table (per-slot tapping term +
-      typed output per tap count). ZMK's native tap-dance compiles one
+      DT config swapped for a live-editable table (per-slot tapping term,
+      fast-typing prior idle, typed tap + optional hold output per tap
+      count; 4 + 22 * TAPS bytes per slot). ZMK's native tap-dance compiles one
       node per dance; this is the app-editable path. LOCAL_IDS selected so
       behavior-typed outputs work on every image. Central-only on splits
       (enable explicitly in the board .conf; the &ftd keymap node

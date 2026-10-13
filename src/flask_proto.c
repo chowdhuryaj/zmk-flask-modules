@@ -246,8 +246,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * v21 (2026-10-04): mouse-key start speed floor on channel 0x2D (pointer
  * 0x04, scroll 0x14; plain u16 percent 0..100, 0 = plain ramp). SAVE blob
  * flask/mousekeys is now version 2 (floor appended per kind); version 1
- * blobs still load and keep the boot floor. Probe = proto >= 21. */
-#define FLASK_PROTO_VERSION 21
+ * blobs still load and keep the boot floor. Probe = proto >= 21.
+ * v22 (2026-10-13): tap dance v2 on channel 0x28 — step 0x50 tap byte bit 7
+ * addresses the HOLD output of that tap count (fires on term expiry with the
+ * key down; interrupts always resolve as the tap), new 0x52 per-slot prior
+ * idle [slot, ms u16 BE] (fast-typing bypass, 0 = off, clamp 1000), and
+ * &fak is accepted as a dance output (&ftd still refused). Slot blobs grow
+ * (holds + prior idle); old-size blobs load with no holds and are rewritten
+ * on the next SAVE. Probe = proto >= 22. */
+#define FLASK_PROTO_VERSION 22
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -419,8 +426,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_SLOT_COUNT 0x02 /* RO */
 #define TD_TAPS 0x03       /* RO — outputs per slot (max tap count) */
 #define TD_STEP 0x50 /* payload-addressed: [slot, tap, action, behavior u16 BE,
-                      * p1 u32 BE, p2 u32 BE] */
+                      * p1 u32 BE, p2 u32 BE]; tap bit 7 = hold output (v22) */
+#define TD_STEP_HOLD 0x80
 #define TD_CFG 0x51  /* payload-addressed: [slot, term u16 BE (0 = default 200)] */
+#define TD_PRIOR_IDLE 0x52 /* payload-addressed: [slot, ms u16 BE (0 = off)] (v22) */
 
 /* Adaptive key values (channel 0x2B, ZMK line) */
 #define AK_ENABLED 0x01
@@ -998,8 +1007,8 @@ static bool handle_csk(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t p
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
 /* Channel 0x28 — step frame [slot, tap, action, behavior u16 BE, p1 u32
- * BE, p2 u32 BE]; per-slot config frame [slot, term u16 BE]. Address
- * bytes echo untouched. */
+ * BE, p2 u32 BE] (tap bit 7 = hold output); per-slot config frames [slot,
+ * term u16 BE] and [slot, prior idle u16 BE]. Address bytes echo untouched. */
 static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, size_t payload_len) {
     switch (value_id) {
     case TD_ENABLED:
@@ -1025,7 +1034,8 @@ static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, siz
             return false;
         }
         uint8_t slot = payload[0];
-        uint8_t tap = payload[1];
+        bool hold = (payload[1] & TD_STEP_HOLD) != 0;
+        uint8_t tap = payload[1] & ~TD_STEP_HOLD;
         struct flask_tapdance_slot s;
 
         if (cmd == CMD_SET) {
@@ -1038,14 +1048,14 @@ static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, siz
                           ((uint32_t)payload[11] << 8) | payload[12],
             };
 
-            if (flask_tapdance_output_set(slot, tap, &out) != 0) {
+            if (flask_tapdance_output_set(slot, tap, hold, &out) != 0) {
                 return false;
             }
         }
         if (flask_tapdance_slot_get(slot, &s) != 0 || tap >= FLASK_TAPDANCE_TAPS) {
             return false;
         }
-        const struct flask_tapdance_output *out = &s.taps[tap];
+        const struct flask_tapdance_output *out = hold ? &s.holds[tap] : &s.taps[tap];
 
         payload[2] = out->action;
         payload[3] = out->behavior_id >> 8;
@@ -1079,6 +1089,24 @@ static bool handle_tapdance(uint8_t cmd, uint8_t value_id, uint8_t *payload, siz
         }
         payload[1] = s.term_ms >> 8;
         payload[2] = s.term_ms;
+        return true;
+    }
+    case TD_PRIOR_IDLE: {
+        if (payload_len < 1 + 2) {
+            return false;
+        }
+        uint8_t slot = payload[0];
+        struct flask_tapdance_slot s;
+
+        if (cmd == CMD_SET &&
+            flask_tapdance_prior_idle_set(slot, ((uint16_t)payload[1] << 8) | payload[2]) != 0) {
+            return false;
+        }
+        if (flask_tapdance_slot_get(slot, &s) != 0) {
+            return false;
+        }
+        payload[1] = s.prior_idle_ms >> 8;
+        payload[2] = s.prior_idle_ms;
         return true;
     }
     default:

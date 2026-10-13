@@ -218,7 +218,8 @@ static uint32_t norm_trigger(uint32_t t) {
     return t;
 }
 
-/* flask_tapdance_output_set normalization, verbatim, plus no recursion (&fak or &ftd). */
+/* flask_tapdance_output_set normalization, plus no recursion: refuses &fak AND &ftd
+ * (tapdance refuses only &ftd, so &ftd -> &fak is the deepest chain). */
 static void step_normalize(struct flask_adaptive_step *out) {
     if (out->action > FLASK_AK_OUT_MAX) {
         out->action = FLASK_AK_OUT_NONE;

@@ -9,11 +9,17 @@
  *    instances would).
  *  - Each press stops the timer, bumps the counter, and re-arms the
  *    per-slot term; reaching the slot's configured length resolves
- *    immediately (fires the LAST output).
- *  - Term expiry resolves at the deadline timestamp; if the key was
- *    already up, the output releases right away (a completed tap).
- *  - Any OTHER key's press interrupts: undecided dances resolve first,
- *    so "td then a letter" keeps its order (core listener semantics).
+ *    immediately (fires the LAST output) unless that count has a hold —
+ *    then release resolves it as the tap, term expiry as the hold.
+ *  - Term expiry resolves at the deadline timestamp: key still down and a
+ *    hold configured for this count = the hold output; otherwise the tap
+ *    (held while the key is, released right away if the key was up).
+ *  - Any OTHER key's press interrupts: undecided dances resolve first as
+ *    the TAP of the current count (never the hold), so "td then a letter"
+ *    keeps its order (core listener semantics).
+ *  - Fast-typing bypass (prior_idle_ms > 0): a fresh dance pressed within
+ *    prior_idle_ms of the last keycode press resolves at once as tap 1,
+ *    so a dance on a letter key does not lag mid-word.
  *  - Fire data is copied out of the slot at resolve time — the table can
  *    be rewritten mid-hold and the release must mirror the press.
  *
@@ -51,6 +57,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_TERM_MIN_MS 50
 #define TD_TERM_MAX_MS 1000
 #define TD_TERM_DEFAULT_MS 200
+#define TD_PRIOR_IDLE_MAX_MS 1000
 
 #define TD_MAX_HELD 4
 #define TD_POSITION_FREE UINT32_MAX
@@ -92,6 +99,7 @@ struct active_dance {
     bool is_pressed;
     bool timer_cancelled;
     bool decided;
+    bool at_max; /* counter hit the length with a hold pending: release = tap */
     int64_t release_at;
     /* Copied at resolve: the release must mirror the press even if the
      * table was rewritten mid-hold. */
@@ -100,6 +108,10 @@ struct active_dance {
 };
 
 static struct active_dance dances[TD_MAX_HELD];
+
+/* Timestamp of the most recent keycode press (any source), for the
+ * fast-typing bypass. -1 = none yet (timestamps are uptime, never < 0). */
+static int64_t last_keycode_press = -1;
 
 static void fire_output_raw(const struct flask_tapdance_output *out, uint32_t position,
                             bool pressed, int64_t timestamp) {
@@ -182,7 +194,9 @@ static void stop_timer(struct active_dance *d) {
     }
 }
 
-static void press_dance(struct active_dance *d, int64_t timestamp) {
+/* hold = fire the count's hold output if it has one (term expiry with the
+ * key down); otherwise, and always for interrupts, the tap output. */
+static void press_dance(struct active_dance *d, bool hold, int64_t timestamp) {
     d->decided = true;
     K_SPINLOCK(&cfg_lock) {
         const struct flask_tapdance_slot *s = &cfg.slots[d->slot];
@@ -192,7 +206,10 @@ static void press_dance(struct active_dance *d, int64_t timestamp) {
         if (len == 0) {
             memset(&d->fired, 0, sizeof(d->fired));
         } else {
-            d->fired = s->taps[MIN((uint8_t)d->counter, len) - 1];
+            uint8_t i = MIN((uint8_t)d->counter, len) - 1;
+
+            d->fired = (hold && s->holds[i].action != FLASK_TD_OUT_NONE) ? s->holds[i]
+                                                                       : s->taps[i];
         }
     }
     fire_output(&d->fired, d->position, true, timestamp);
@@ -214,7 +231,7 @@ static void timer_handler(struct k_work *item) {
         return;
     }
     LOG_DBG("flask_tapdance: slot %d decided by timer at %d taps", d->slot, d->counter);
-    press_dance(d, d->release_at);
+    press_dance(d, d->is_pressed, d->release_at);
     if (!d->is_pressed) {
         release_dance(d, d->release_at);
     }
@@ -225,7 +242,9 @@ static void timer_handler(struct k_work *item) {
 int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
     uint8_t len = 0;
     uint16_t term = TD_TERM_DEFAULT_MS;
+    uint16_t prior_idle;
     bool enabled;
+    bool last_has_hold;
 
     if (slot >= FLASK_TAPDANCE_SLOTS) {
         return -EINVAL;
@@ -236,6 +255,8 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
         if (cfg.slots[slot].term_ms) {
             term = cfg.slots[slot].term_ms;
         }
+        prior_idle = cfg.slots[slot].prior_idle_ms;
+        last_has_hold = len > 0 && cfg.slots[slot].holds[len - 1].action != FLASK_TD_OUT_NONE;
     }
     if (!enabled || len == 0) {
         LOG_DBG("flask_tapdance: slot %d empty/disabled — key does nothing", slot);
@@ -253,6 +274,7 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
                 d->counter = 0;
                 d->timer_cancelled = false;
                 d->decided = false;
+                d->at_max = false;
                 d->release_at = 0;
                 break;
             }
@@ -265,13 +287,23 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
 
     d->is_pressed = true;
     stop_timer(d);
+    if (d->counter == 0 && prior_idle > 0 && last_keycode_press >= 0 &&
+        timestamp - last_keycode_press < prior_idle) {
+        /* Fast typing: tap 1 now, held until release. */
+        d->counter = 1;
+        press_dance(d, false, timestamp);
+        return 0;
+    }
     if (d->counter < len) {
         d->counter++;
     }
     if (d->counter == len) {
-        /* Max taps — decided immediately (core semantics). */
-        press_dance(d, timestamp);
-        return 0;
+        if (!last_has_hold) {
+            /* Max taps — decided immediately (core semantics). */
+            press_dance(d, false, timestamp);
+            return 0;
+        }
+        d->at_max = true; /* release = tap, term expiry while down = hold */
     }
     d->release_at = timestamp + term;
 
@@ -290,15 +322,30 @@ int flask_tapdance_released(uint8_t slot, uint32_t position, int64_t timestamp) 
         return 0; /* dance already resolved and released (or slot empty) */
     }
     d->is_pressed = false;
+    if (!d->decided && d->at_max) {
+        /* Last count with a hold, released before the term: a tap. */
+        stop_timer(d);
+        press_dance(d, false, timestamp);
+    }
     if (d->decided) {
         release_dance(d, timestamp);
     }
     return 0;
 }
 
-/* Interrupts: any OTHER key's press resolves undecided dances first, so
- * "dance key then letter" keeps its order (core listener, verbatim). */
-static int td_position_listener(const zmk_event_t *eh) {
+/* Interrupts: any OTHER key's press resolves undecided dances first (as
+ * the tap), so "dance key then letter" keeps its order (core listener).
+ * Keycode presses only stamp the fast-typing clock. */
+static int td_listener(const zmk_event_t *eh) {
+    struct zmk_keycode_state_changed *kc = as_zmk_keycode_state_changed(eh);
+
+    if (kc != NULL) {
+        if (kc->state) {
+            last_keycode_press = kc->timestamp;
+        }
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
     struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
 
     if (ev == NULL || !ev->state) {
@@ -312,7 +359,7 @@ static int td_position_listener(const zmk_event_t *eh) {
         }
         stop_timer(d);
         if (!d->decided) {
-            press_dance(d, ev->timestamp);
+            press_dance(d, false, ev->timestamp);
             if (!d->is_pressed) {
                 release_dance(d, ev->timestamp);
             }
@@ -321,8 +368,9 @@ static int td_position_listener(const zmk_event_t *eh) {
     return ZMK_EV_EVENT_BUBBLE;
 }
 
-ZMK_LISTENER(flask_tapdance, td_position_listener);
+ZMK_LISTENER(flask_tapdance, td_listener);
 ZMK_SUBSCRIPTION(flask_tapdance, zmk_position_state_changed);
+ZMK_SUBSCRIPTION(flask_tapdance, zmk_keycode_state_changed);
 
 /* --- runtime API (proto channel 0x28) --- */
 
@@ -365,7 +413,19 @@ int flask_tapdance_term_set(uint8_t idx, uint16_t term_ms) {
     return 0;
 }
 
-int flask_tapdance_output_set(uint8_t idx, uint8_t tap, const struct flask_tapdance_output *in) {
+int flask_tapdance_prior_idle_set(uint8_t idx, uint16_t prior_idle_ms) {
+    if (idx >= FLASK_TAPDANCE_SLOTS) {
+        return -EINVAL;
+    }
+    K_SPINLOCK(&cfg_lock) {
+        cfg.slots[idx].prior_idle_ms = MIN(prior_idle_ms, TD_PRIOR_IDLE_MAX_MS);
+        slots_dirty |= BIT64(idx);
+    }
+    return 0;
+}
+
+int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
+                              const struct flask_tapdance_output *in) {
     if (idx >= FLASK_TAPDANCE_SLOTS || tap >= FLASK_TAPDANCE_TAPS || in == NULL) {
         return -EINVAL;
     }
@@ -378,8 +438,8 @@ int flask_tapdance_output_set(uint8_t idx, uint8_t tap, const struct flask_tapda
     if (out.action == FLASK_TD_OUT_USAGE && out.param1 == 0) {
         out.action = FLASK_TD_OUT_NONE;
     }
-    if (out.action == FLASK_TD_OUT_BEHAVIOR && flask_behavior_id_is_dispatcher(out.behavior_id)) {
-        out.action = FLASK_TD_OUT_NONE; /* &ftd/&fak output would re-enter at this position */
+    if (out.action == FLASK_TD_OUT_BEHAVIOR && flask_behavior_id_is_tapdance(out.behavior_id)) {
+        out.action = FLASK_TD_OUT_NONE; /* &ftd output would re-enter at this position */
     }
     if (out.action == FLASK_TD_OUT_NONE) {
         out.behavior_id = 0;
@@ -393,7 +453,11 @@ int flask_tapdance_output_set(uint8_t idx, uint8_t tap, const struct flask_tapda
         }
     }
     K_SPINLOCK(&cfg_lock) {
-        cfg.slots[idx].taps[tap] = out;
+        if (hold) {
+            cfg.slots[idx].holds[tap] = out;
+        } else {
+            cfg.slots[idx].taps[tap] = out;
+        }
         slots_dirty |= BIT64(idx);
     }
     return 0;
@@ -408,12 +472,19 @@ struct flask_tapdance_saved_cfg {
 
 #define TD_SETTINGS_VERSION 1
 
+/* Pre-v22 slot blob: term + taps only. Restored with no holds, bypass off,
+ * and marked dirty so the next SAVE rewrites it in the current layout. */
+struct flask_tapdance_slot_v1 {
+    uint16_t term_ms;
+    struct flask_tapdance_output taps[FLASK_TAPDANCE_TAPS];
+} __packed;
+
 static bool slot_is_empty(const struct flask_tapdance_slot *s) {
-    if (s->term_ms != 0) {
+    if (s->term_ms != 0 || s->prior_idle_ms != 0) {
         return false;
     }
     for (int t = 0; t < FLASK_TAPDANCE_TAPS; t++) {
-        if (s->taps[t].action != FLASK_TD_OUT_NONE) {
+        if (s->taps[t].action != FLASK_TD_OUT_NONE || s->holds[t].action != FLASK_TD_OUT_NONE) {
             return false;
         }
     }
@@ -507,28 +578,49 @@ int flask_tapdance_settings_restore(const char *sub, size_t len, settings_read_c
 
     if (sub[0] == 's') {
         int idx = atoi(&sub[1]);
-        struct flask_tapdance_slot s;
+        struct flask_tapdance_slot s = {0};
+        bool migrated = false;
 
         if (idx < 0 || idx >= FLASK_TAPDANCE_SLOTS) {
             LOG_WRN("flask/tapdance/%s ignored (bad index)", sub);
             return 0;
         }
-        if (len != sizeof(s)) {
+        if (len == sizeof(struct flask_tapdance_slot_v1)) {
+            struct flask_tapdance_slot_v1 old;
+
+            if (read_cb(cb_arg, &old, sizeof(old)) < 0) {
+                return -EIO;
+            }
+            s.term_ms = old.term_ms;
+            memcpy(s.taps, old.taps, sizeof(s.taps));
+            migrated = true;
+        } else if (len == sizeof(s)) {
+            if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
+                return -EIO;
+            }
+        } else {
             LOG_WRN("flask/tapdance/%s ignored (len %d)", sub, (int)len);
             return 0;
-        }
-        if (read_cb(cb_arg, &s, sizeof(s)) < 0) {
-            return -EIO;
         }
         for (int t = 0; t < FLASK_TAPDANCE_TAPS; t++) {
             if (s.taps[t].action > FLASK_TD_OUT_MAX) {
                 s.taps[t].action = FLASK_TD_OUT_NONE;
             }
+            if (s.holds[t].action > FLASK_TD_OUT_MAX) {
+                s.holds[t].action = FLASK_TD_OUT_NONE;
+            }
+        }
+        if (s.prior_idle_ms > TD_PRIOR_IDLE_MAX_MS) {
+            s.prior_idle_ms = TD_PRIOR_IDLE_MAX_MS;
         }
         K_SPINLOCK(&cfg_lock) {
             cfg.slots[idx] = s;
             slots_saved |= BIT64(idx);
-            slots_dirty &= ~BIT64(idx);
+            if (migrated) {
+                slots_dirty |= BIT64(idx);
+            } else {
+                slots_dirty &= ~BIT64(idx);
+            }
         }
         return 0;
     }

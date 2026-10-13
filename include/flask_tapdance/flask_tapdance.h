@@ -12,15 +12,25 @@
  * output for that tap count with real press/release pairing (still held =
  * output held).
  *
+ * v22 (QMK/Vial-style): each tap count may also carry a HOLD output, fired
+ * when the term expires with the key still down (released with the key).
+ * An interrupting key always resolves as the TAP. The last count with a
+ * hold waits for release/term instead of resolving at press. Fast-typing
+ * bypass: with prior_idle_ms > 0, a fresh dance starting within that many
+ * ms of the last keycode press fires tap 1 at once (held until release).
+ *
  * Outputs are typed like combos v12: encoded HID usage, flask_macros
  * slot, or any Studio-addressable behavior by local id with two params —
  * fired with the dance's key position, so a hold-tap output behaves like
- * a real key at that position.
+ * a real key at that position. &ftd is refused as an output (self
+ * re-entry); &fak is allowed (adaptive refuses &ftd/&fak, so it ends).
  *
  * Wire (channel 0x28): enabled 0x01, slot count 0x02 RO, taps-per-slot
  * 0x03 RO, step 0x50 payload-addressed [slot, tap, action, behavior u16
- * BE, p1 u32 BE, p2 u32 BE], per-slot config 0x51 payload-addressed
- * [slot, term u16 BE]. Central-only on splits.
+ * BE, p1 u32 BE, p2 u32 BE] (tap bit 7 = the HOLD output of tap index
+ * tap & 0x7F, v22), per-slot config 0x51 payload-addressed [slot, term
+ * u16 BE], per-slot prior idle 0x52 payload-addressed [slot, ms u16 BE]
+ * (0 = off, clamp 1000, v22). Central-only on splits.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -52,12 +62,16 @@ struct flask_tapdance_output {
     uint32_t param2;
 } __packed;
 
-/* One dance: tapping term + one output per tap count (index 0 = single
- * tap). The dance length is the contiguous configured prefix — the first
- * NONE output ends it (core tap-dance "behavior_count"). */
+/* One dance: tapping term + prior idle + a tap and an optional hold output
+ * per tap count (index 0 = single tap). The dance length is the contiguous
+ * configured prefix of taps[] — the first NONE tap ends it (core tap-dance
+ * "behavior_count"); holds[i] past the length is ignored. Saved as-is
+ * (v1 blobs were term + taps only; restore migrates them). */
 struct flask_tapdance_slot {
     uint16_t term_ms;
+    uint16_t prior_idle_ms; /* 0 = no fast-typing bypass */
     struct flask_tapdance_output taps[FLASK_TAPDANCE_TAPS];
+    struct flask_tapdance_output holds[FLASK_TAPDANCE_TAPS];
 } __packed;
 
 bool flask_tapdance_enabled(void);
@@ -68,7 +82,10 @@ uint8_t flask_tapdance_tap_count(void);
 
 int flask_tapdance_slot_get(uint8_t idx, struct flask_tapdance_slot *out);
 int flask_tapdance_term_set(uint8_t idx, uint16_t term_ms);
-int flask_tapdance_output_set(uint8_t idx, uint8_t tap, const struct flask_tapdance_output *in);
+int flask_tapdance_prior_idle_set(uint8_t idx, uint16_t prior_idle_ms);
+/* hold = false sets taps[tap], true sets holds[tap]. */
+int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
+                              const struct flask_tapdance_output *in);
 
 /* Engine entry points for the &ftd behavior driver. */
 int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp);
