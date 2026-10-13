@@ -25,9 +25,10 @@
  * for the Nth press, sticky at the last), held with the key; the chain
  * stays open for the term after each press. Holds are ignored.
  *
- * Fixed-slot nodes (`slot = <n>`, #binding-cells 0) run one slot with no
- * param, e.g. as a hold-tap's tap binding. A `flask,tapdance-defaults`
- * node seeds slots at boot that settings never held (app edits win).
+ * Fixed-slot nodes (zmk,behavior-flask-tapdance-slot: `slot = <n>`,
+ * #binding-cells 0) run one slot with no param, e.g. as a hold-tap's tap
+ * binding. A `flask,tapdance-defaults` node seeds slots at boot that
+ * settings never held (app edits win).
  *
  * Outputs are typed like combos v12: encoded HID usage, flask_macros
  * slot, or any Studio-addressable behavior by local id with two params —

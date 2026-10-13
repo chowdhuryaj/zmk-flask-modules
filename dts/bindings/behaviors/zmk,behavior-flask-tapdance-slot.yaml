@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "Fixed-slot Flask runtime tap dance: runs one flask_tapdance slot with no
+  binding cell (usable as a hold-tap's tap binding). The slot's term, flags
+  and outputs are live-editable over the Flask protocol (channel 0x28),
+  same as &ftd <slot>."
+
+compatible: "zmk,behavior-flask-tapdance-slot"
+
+properties:
+  display-name:
+    type: string
+  "#binding-cells":
+    type: int
+    required: true
+    const: 0
+  slot:
+    type: int
+    required: true
+    description: "The dance slot this node runs"

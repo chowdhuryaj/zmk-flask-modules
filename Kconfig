@@ -285,13 +285,16 @@ config ZMK_FLASK_TAPDANCE_TAPS
     default 4
 
 DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE := zmk,behavior-flask-tapdance
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE_SLOT := zmk,behavior-flask-tapdance-slot
 
 config ZMK_BEHAVIOR_FLASK_TAPDANCE
     bool "Flask tap dance behavior (&ftd)"
-    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE))
+    default y if $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE))
+    default y if $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_TAPDANCE_SLOT))
     depends on ZMK_FLASK_TAPDANCE
     help
-      Keymap behavior running a flask_tapdance slot: &ftd <slot>.
+      Keymap behavior running a flask_tapdance slot: &ftd <slot>, and
+      fixed-slot nodes (zmk,behavior-flask-tapdance-slot, no cell).
 
 config ZMK_FLASK_ADAPTIVE
     bool "Flask runtime adaptive keys"

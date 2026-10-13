@@ -1,10 +1,11 @@
 /*
  * &ftd behavior — keymap trigger for flask_tapdance.
  *
- * One param: the dance slot index (0..FLASK_TAPDANCE_SLOTS-1). A node with
- * a `slot` property is a FIXED-slot dance instead: #binding-cells 0, no
- * Studio param, usable where a binding takes no cell (a hold-tap's tap
- * side). Every instance is a dance to the recursion guard. Press and
+ * One param: the dance slot index (0..FLASK_TAPDANCE_SLOTS-1). Nodes of
+ * the second compat zmk,behavior-flask-tapdance-slot are FIXED-slot dances
+ * (`slot = <n>`, #binding-cells 0, no Studio param), usable where a binding
+ * takes no cell (a hold-tap's tap side). Every instance of either compat is
+ * a dance to the recursion guard. Press and
  * release feed the runtime dance engine keyed by the key's position; the
  * engine owns counting, the per-slot term, and firing the tap-count
  * output. Parameter metadata advertises the slot range so ZMK Studio
@@ -25,7 +26,8 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
+#if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) ||                                                    \
+    DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_flask_tapdance_slot)
 
 struct ftd_config {
     int16_t slot; /* -1 = &ftd <slot> (param1) */
@@ -92,15 +94,21 @@ static const struct behavior_driver_api __maybe_unused behavior_flask_tapdance_f
 static int behavior_flask_tapdance_init(const struct device *dev) { return 0; }
 
 #define FTD_INST(n)                                                                                \
-    BUILD_ASSERT(DT_INST_PROP_OR(n, slot, 0) < FLASK_TAPDANCE_SLOTS,                               \
-                 "flask tap dance: slot >= ZMK_FLASK_TAPDANCE_SLOTS");                             \
-    static const struct ftd_config ftd_config_##n = {.slot = DT_INST_PROP_OR(n, slot, -1)};        \
+    static const struct ftd_config ftd_config_##n = {.slot = -1};                                  \
     BEHAVIOR_DT_INST_DEFINE(n, behavior_flask_tapdance_init, NULL, NULL, &ftd_config_##n,          \
                             POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                      \
-                            COND_CODE_1(DT_INST_NODE_HAS_PROP(n, slot),                            \
-                                        (&behavior_flask_tapdance_fixed_driver_api),               \
-                                        (&behavior_flask_tapdance_driver_api)));
+                            &behavior_flask_tapdance_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(FTD_INST)
 
-#endif /* DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) */
+#define FTDS_NODE(node)                                                                            \
+    BUILD_ASSERT(DT_PROP(node, slot) < FLASK_TAPDANCE_SLOTS,                                       \
+                 "flask tap dance: slot >= ZMK_FLASK_TAPDANCE_SLOTS");                             \
+    static const struct ftd_config ftd_config_##node = {.slot = DT_PROP(node, slot)};              \
+    BEHAVIOR_DT_DEFINE(node, behavior_flask_tapdance_init, NULL, NULL, &ftd_config_##node,         \
+                       POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                           \
+                       &behavior_flask_tapdance_fixed_driver_api);
+
+DT_FOREACH_STATUS_OKAY(zmk_behavior_flask_tapdance_slot, FTDS_NODE)
+
+#endif

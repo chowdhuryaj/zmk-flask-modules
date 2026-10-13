@@ -68,6 +68,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define TD_TERM_DEFAULT_MS 200
 #define TD_PRIOR_IDLE_MAX_MS 1000
 #define TD_RELEASE_MAX_MS 1000
+/* An eager chain's entry outlives its deadline by this much (uptime), so a
+ * press a hold-tap delivers late (decided at release, stamped with the
+ * press time) still finds the chain; open/closed is decided by event
+ * timestamps. ponytail: fixed, covers hold-tap terms up to ~1 s. */
+#define TD_EAGER_GRACE_MS 1000
 
 #define TD_MAX_HELD 4
 #define TD_POSITION_FREE UINT32_MAX
@@ -235,16 +240,24 @@ static void eager_close(struct active_dance *d) {
 
 /* After-release window: pull the deadline in to release + release_ms, never
  * later than it already is. */
+/* Timer at the deadline (non-eager: resolve) or the deadline + grace
+ * (eager: cleanup only). reschedule, not schedule — a stale one is replaced. */
+static void arm_timer(struct active_dance *d) {
+    int32_t ms_left = d->release_at + (d->eager ? TD_EAGER_GRACE_MS : 0) - k_uptime_get();
+
+    k_work_reschedule(&d->release_timer, ms_left > 0 ? K_MSEC(ms_left) : K_NO_WAIT);
+}
+
+/* Anchored on the later of the event time and now: a hold-tap delivers the
+ * release stamped with its PRESS time, which would end the window early. */
 static void apply_release_window(struct active_dance *d, int64_t timestamp) {
+    int64_t anchor = MAX(timestamp, k_uptime_get());
     uint16_t window;
 
     K_SPINLOCK(&cfg_lock) { window = cfg.slots[d->slot].release_ms; }
-    if (window && timestamp + window < d->release_at) {
-        d->release_at = timestamp + window;
-
-        int32_t ms_left = d->release_at - k_uptime_get();
-
-        k_work_reschedule(&d->release_timer, ms_left > 0 ? K_MSEC(ms_left) : K_NO_WAIT);
+    if (window && anchor + window < d->release_at) {
+        d->release_at = anchor + window;
+        arm_timer(d);
     }
 }
 
@@ -352,8 +365,10 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
             /* One key cannot re-press while down; never leave a step stuck. */
             fire_output(&d->fired, d->position, false, timestamp);
         }
-        if (d->decided) {
-            d->counter = 0; /* chain closed while held: start over */
+        if (d->decided || timestamp >= d->release_at) {
+            /* Chain closed while held, or this press (by its own event
+             * time) came after the deadline: start over. */
+            d->counter = 0;
         }
         d->is_pressed = true;
         d->pressed_at = timestamp;
@@ -364,10 +379,7 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
         press_dance(d, false, timestamp);
         d->decided = false; /* the chain stays open */
         d->release_at = timestamp + term;
-
-        int32_t ms_left = d->release_at - k_uptime_get();
-
-        k_work_reschedule(&d->release_timer, ms_left > 0 ? K_MSEC(ms_left) : K_NO_WAIT);
+        arm_timer(d);
         return 0;
     }
 

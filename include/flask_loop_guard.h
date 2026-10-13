@@ -35,14 +35,15 @@ uint8_t flask_guard_depth __attribute__((weak));
 #define FLASK_GUARD_LEAVE() (--flask_guard_depth)
 
 /* Every tap dance instance counts: &ftd <slot> and each fixed-slot node
- * (`slot = <n>`, #binding-cells 0) of the same compat. */
+ * (zmk,behavior-flask-tapdance-slot). */
 #define FLASK_GUARD_TD_ID(node) || zmk_behavior_get_local_id(DEVICE_DT_NAME(node)) == id
 
 static inline bool flask_behavior_id_is_tapdance(uint16_t id) {
     if (id == 0 || id == UINT16_MAX) {
         return false;
     }
-    return false DT_FOREACH_STATUS_OKAY(zmk_behavior_flask_tapdance, FLASK_GUARD_TD_ID);
+    return false DT_FOREACH_STATUS_OKAY(zmk_behavior_flask_tapdance, FLASK_GUARD_TD_ID)
+        DT_FOREACH_STATUS_OKAY(zmk_behavior_flask_tapdance_slot, FLASK_GUARD_TD_ID);
 }
 
 static inline bool flask_behavior_id_is_dispatcher(uint16_t id) {

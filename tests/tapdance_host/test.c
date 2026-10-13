@@ -716,6 +716,48 @@ int main(void) {
         check("seed: tombstone survives reboot", s.term_ms == 0 && s.taps[0].action == 0, "");
     }
 
+    /* Late delivery from a hold-tap: the tap is decided at RELEASE and both
+     * press and release carry the PRESS timestamp (flask_holdtap). */
+    flask_tapdance_flags_set(4, FLASK_TD_FLAG_EAGER); /* slot 4: eager, term 400 */
+    idle();
+    {
+        int64_t t0 = stub_now;
+
+        flask_tapdance_pressed(4, 4, t0);
+        advance(60);
+        flask_tapdance_released(4, 4, t0);
+        expect("late eager: tap 1", "+60 -60 ");
+        advance(350); /* now t0+410: past the 400 ms deadline in uptime */
+        flask_tapdance_pressed(4, 4, t0 + 350);
+        expect("late eager: press stamped inside the term continues", "+61 ");
+        flask_tapdance_released(4, 4, t0 + 350);
+        expect("late eager: release", "-61 ");
+        advance(500); /* now t0+910 */
+        flask_tapdance_pressed(4, 4, t0 + 760); /* stamped past t0+350+400 */
+        expect("late eager: press stamped past the deadline restarts", "+60 ");
+        flask_tapdance_released(4, 4, t0 + 760);
+        out_log[0] = 0;
+    }
+
+    /* After-release window anchored on now, not the hold-tap's press stamp
+     * (slot 0: term 200, window 80). */
+    flask_tapdance_release_set(0, 80);
+    idle();
+    {
+        int64_t t0 = stub_now;
+
+        flask_tapdance_pressed(0, 0, t0);
+        advance(150);
+        flask_tapdance_released(0, 0, t0); /* delivered at t0+150, stamped t0 */
+        advance(1);
+        expect("late window: not over at once", "");
+        advance(48); /* t0+199 */
+        expect("late window: press deadline kept (now + 80 is later)", "");
+        advance(1);
+        expect("late window: resolves at press + term", "+4 -4 ");
+    }
+    flask_tapdance_release_set(0, 0);
+
     /* balance: every +X has a later -X */
     idle();
     {
