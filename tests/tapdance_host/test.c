@@ -142,7 +142,7 @@ int main(void) {
     struct flask_tapdance_slot s;
 
     sys_init_flask_tapdance_init();
-    assert(sizeof(struct flask_tapdance_slot) == 6 + 2 * FLASK_TAPDANCE_TAPS * 11);
+    assert(sizeof(struct flask_tapdance_slot) == 7 + 2 * FLASK_TAPDANCE_TAPS * 11);
 
     /* slot 0: taps 4,5,6; holds on counts 1,2 (20, 21); count 3 none = fast path */
     set_out(0, 0, false, FLASK_TD_OUT_USAGE, 0, 4);
@@ -568,6 +568,60 @@ int main(void) {
         snprintf(v2_got, sizeof(v2_got), "%zu -> %zu bytes", sizeof(v2), saved_len);
         check("v2 blob upgrades, SAVE rewrites it", up, v2_got);
     }
+
+    /* Eager (Super Delete feel), slot 4: taps 60,61,62, a hold 63 that must
+     * be ignored, term 400 press-to-press. */
+    set_out(4, 0, false, FLASK_TD_OUT_USAGE, 0, 60);
+    set_out(4, 1, false, FLASK_TD_OUT_USAGE, 0, 61);
+    set_out(4, 2, false, FLASK_TD_OUT_USAGE, 0, 62);
+    set_out(4, 0, true, FLASK_TD_OUT_USAGE, 0, 63);
+    flask_tapdance_term_set(4, 400);
+    flask_tapdance_flags_set(4, 0xFF);
+    flask_tapdance_slot_get(4, &s);
+    check("eager: unknown flag bits cleared", s.flags == FLASK_TD_FLAG_EAGER, "");
+    idle();
+    td_down(4);
+    expect("eager: tap 1 at press", "+60 ");
+    td_up(4);
+    expect("eager: tap 1 release", "-60 ");
+    advance(100); td_down(4);
+    expect("eager: tap 2 at press", "+61 ");
+    td_up(4); advance(100); td_down(4);
+    expect("eager: tap 3 at press", "-61 +62 ");
+    td_up(4); advance(100); td_down(4); td_up(4);
+    expect("eager: tap 4 sticks at the last", "-62 +62 -62 ");
+    advance(399); td_down(4); td_up(4);
+    expect("eager: inside term keeps going", "+62 -62 ");
+    advance(401); td_down(4);
+    expect("eager: pause > term restarts", "+60 ");
+    td_up(4);
+    out_log[0] = 0;
+    advance(50); other_down(); other_up(); advance(50); td_down(4); td_up(4);
+    expect("eager: interrupt ends the chain", "+99 -99 +60 -60 ");
+    advance(50); td_down(4); advance(50); other_down(); other_up(); td_up(4);
+    expect("eager: interrupt while held keeps it held", "+61 +99 -99 -61 ");
+    advance(50); td_down(4);
+    expect("eager: chain closed by interrupt restarts", "+60 ");
+    advance(1000);
+    expect("eager: held step holds, no hold output", "");
+    td_up(4);
+    expect("eager: held step releases with the key", "-60 ");
+    advance(50); td_down(4); td_up(4);
+    expect("eager: chain closed while held restarts", "+60 -60 ");
+    idle();
+    flask_tapdance_release_set(4, 50);
+    td_down(4); advance(10); td_up(4); advance(60); td_down(4); td_up(4);
+    expect("eager: release window shortens the chain", "+60 -60 +60 -60 ");
+    advance(20); td_down(4); td_up(4);
+    expect("eager: inside release window continues", "+61 -61 ");
+    flask_tapdance_release_set(4, 0);
+    idle();
+    slots_dirty = BIT64(4);
+    flask_tapdance_save();
+    memset(&s, 0, sizeof(s));
+    assert(flask_tapdance_settings_restore("s9", saved_len, read_buf, saved_buf) == 0);
+    flask_tapdance_slot_get(9, &s);
+    check("eager flag persists with the slot", s.flags == FLASK_TD_FLAG_EAGER && s.term_ms == 400, "");
 
     /* balance: every +X has a later -X */
     idle();

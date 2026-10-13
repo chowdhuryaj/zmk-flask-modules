@@ -21,6 +21,9 @@
  * v23: after-release window — with release_ms > 0, releasing the key while
  * more taps are possible resolves at min(press deadline, release +
  * release_ms), so a finished tap fires sooner. Never later than before.
+ * Eager slots (flags bit 0): each press fires its step immediately (tap N
+ * for the Nth press, sticky at the last), held with the key; the chain
+ * stays open for the term after each press. Holds are ignored.
  *
  * Outputs are typed like combos v12: encoded HID usage, flask_macros
  * slot, or any Studio-addressable behavior by local id with two params —
@@ -34,7 +37,9 @@
  * tap & 0x7F, v22), per-slot config 0x51 payload-addressed [slot, term
  * u16 BE], per-slot prior idle 0x52 payload-addressed [slot, ms u16 BE]
  * (0 = off, clamp 1000, v22), per-slot after-release window 0x53
- * payload-addressed [slot, ms u16 BE] (0 = off, clamp 1000, v23).
+ * payload-addressed [slot, ms u16 BE] (0 = off, clamp 1000, v23), per-slot
+ * flags 0x54 payload-addressed [slot, flags u8] (bit 0 eager; unknown bits
+ * cleared, v23).
  * Central-only on splits.
  *
  * SPDX-License-Identifier: MIT
@@ -72,12 +77,16 @@ struct flask_tapdance_output {
  * configured prefix of taps[] — the first NONE tap ends it (core tap-dance
  * "behavior_count"); holds[i] past the length is ignored. Saved as-is
  * (v1 blobs were term + taps, v2 lacked release_ms; restore upgrades them). */
+#define FLASK_TD_FLAG_EAGER 0x01 /* fire each step at press (Super Delete feel) */
+#define FLASK_TD_FLAGS_KNOWN FLASK_TD_FLAG_EAGER
+
 struct flask_tapdance_slot {
     uint16_t term_ms;
     uint16_t prior_idle_ms; /* 0 = no fast-typing bypass */
     /* After-release window: a release with more taps possible pulls the
      * deadline in to release + release_ms (never later). 0 = off. */
     uint16_t release_ms;
+    uint8_t flags; /* FLASK_TD_FLAG_* */
     struct flask_tapdance_output taps[FLASK_TAPDANCE_TAPS];
     struct flask_tapdance_output holds[FLASK_TAPDANCE_TAPS];
 } __packed;
@@ -92,6 +101,7 @@ int flask_tapdance_slot_get(uint8_t idx, struct flask_tapdance_slot *out);
 int flask_tapdance_term_set(uint8_t idx, uint16_t term_ms);
 int flask_tapdance_prior_idle_set(uint8_t idx, uint16_t prior_idle_ms);
 int flask_tapdance_release_set(uint8_t idx, uint16_t release_ms);
+int flask_tapdance_flags_set(uint8_t idx, uint8_t flags);
 /* hold = false sets taps[tap], true sets holds[tap]. */
 int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
                               const struct flask_tapdance_output *in);
