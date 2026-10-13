@@ -63,6 +63,7 @@
 #endif
 #if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
 #include <flask_tapdance/flask_tapdance.h>
+#include <flask_loop_guard.h>
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_LAYER_AUTOEXIT)
@@ -444,7 +445,13 @@ static void activate_combo(int slot_idx) {
      * combo key) before the combo types. Here, not in the earlier keystate
      * listener: dance outputs fired there would stamp last_tapped_ts ahead
      * of this module's prior-idle check. At last_combo_ts they don't. */
-    flask_tapdance_interrupt(UINT32_MAX, timestamp);
+    /* A combo whose output IS a dance (&ftd) runs it at active->position:
+     * spare that one so repeated combo taps keep counting. */
+    flask_tapdance_interrupt((active->action == FLASK_COMBO_OUT_BEHAVIOR &&
+                              flask_behavior_id_is_tapdance(active->behavior_id))
+                                 ? active->position
+                                 : UINT32_MAX,
+                             timestamp);
 #endif
     fire_output(active, true, timestamp);
 }
