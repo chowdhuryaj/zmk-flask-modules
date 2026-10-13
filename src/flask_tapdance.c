@@ -85,6 +85,11 @@ static struct k_spinlock cfg_lock;
 
 static uint64_t slots_saved;
 static uint64_t slots_dirty;
+/* Slots with a compiled default (flask,tapdance-defaults): emptying one
+ * saves an all-zero tombstone instead of deleting the key, or the seed
+ * would come back on the next boot. */
+static uint64_t slots_defaulted;
+static uint64_t __maybe_unused slots_seeded; /* defaults_commit has handled this slot */
 static bool cfg_saved;
 static bool cfg_dirty;
 
@@ -548,6 +553,29 @@ int flask_tapdance_flags_set(uint8_t idx, uint8_t flags) {
     return 0;
 }
 
+static void normalize_output(struct flask_tapdance_output *out) {
+    if (out->action > FLASK_TD_OUT_MAX) {
+        out->action = FLASK_TD_OUT_NONE;
+    }
+    if (out->action == FLASK_TD_OUT_USAGE && out->param1 == 0) {
+        out->action = FLASK_TD_OUT_NONE;
+    }
+    if (out->action == FLASK_TD_OUT_BEHAVIOR && flask_behavior_id_is_tapdance(out->behavior_id)) {
+        out->action = FLASK_TD_OUT_NONE; /* a dance output would re-enter at this position */
+    }
+    if (out->action == FLASK_TD_OUT_NONE) {
+        out->behavior_id = 0;
+        out->param1 = 0;
+        out->param2 = 0;
+    }
+    if (out->action != FLASK_TD_OUT_BEHAVIOR) {
+        out->behavior_id = 0;
+        if (out->action != FLASK_TD_OUT_NONE) {
+            out->param2 = 0;
+        }
+    }
+}
+
 int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
                               const struct flask_tapdance_output *in) {
     if (idx >= FLASK_TAPDANCE_SLOTS || tap >= FLASK_TAPDANCE_TAPS || in == NULL) {
@@ -556,26 +584,7 @@ int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
 
     struct flask_tapdance_output out = *in;
 
-    if (out.action > FLASK_TD_OUT_MAX) {
-        out.action = FLASK_TD_OUT_NONE;
-    }
-    if (out.action == FLASK_TD_OUT_USAGE && out.param1 == 0) {
-        out.action = FLASK_TD_OUT_NONE;
-    }
-    if (out.action == FLASK_TD_OUT_BEHAVIOR && flask_behavior_id_is_tapdance(out.behavior_id)) {
-        out.action = FLASK_TD_OUT_NONE; /* &ftd output would re-enter at this position */
-    }
-    if (out.action == FLASK_TD_OUT_NONE) {
-        out.behavior_id = 0;
-        out.param1 = 0;
-        out.param2 = 0;
-    }
-    if (out.action != FLASK_TD_OUT_BEHAVIOR) {
-        out.behavior_id = 0;
-        if (out.action != FLASK_TD_OUT_NONE) {
-            out.param2 = 0;
-        }
-    }
+    normalize_output(&out);
     K_SPINLOCK(&cfg_lock) {
         if (hold) {
             cfg.slots[idx].holds[tap] = out;
@@ -632,7 +641,7 @@ static bool slot_is_empty(const struct flask_tapdance_slot *s) {
 int flask_tapdance_save(void) {
     struct flask_tapdance_saved_cfg saved = {.version = TD_SETTINGS_VERSION};
     static struct flask_tapdance_slot slots[FLASK_TAPDANCE_SLOTS];
-    uint64_t pending, saved_bits;
+    uint64_t pending, saved_bits, defaulted;
     bool write_cfg;
 
     K_SPINLOCK(&cfg_lock) {
@@ -640,6 +649,7 @@ int flask_tapdance_save(void) {
         memcpy(slots, cfg.slots, sizeof(slots));
         pending = slots_dirty;
         saved_bits = slots_saved;
+        defaulted = slots_defaulted;
         write_cfg = cfg_dirty || !cfg_saved;
         slots_dirty = 0;
         cfg_dirty = false;
@@ -666,6 +676,8 @@ int flask_tapdance_save(void) {
         char key[26];
         int err = 0;
 
+        /* A defaulted slot always keeps a key (all-zero = tombstone). */
+        empty = empty && !(defaulted & BIT64(i));
         snprintf(key, sizeof(key), "flask/tapdance/s%d", i);
         if (empty && on_flash) {
             err = settings_delete(key);
@@ -779,6 +791,119 @@ int flask_tapdance_settings_restore(const char *sub, size_t len, settings_read_c
     }
     return -ENOENT;
 }
+
+/* --- compiled defaults (flask,tapdance-defaults) -> live table --- */
+
+struct td_default {
+    uint8_t slot;
+    uint16_t term_ms;
+    uint16_t release_ms;
+    uint8_t flags;
+    uint8_t n_bind;
+    struct zmk_behavior_binding b[FLASK_TAPDANCE_TAPS];
+};
+
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_key_press)
+#define TD_KP_NAME_INIT DEVICE_DT_NAME(DT_COMPAT_GET_ANY_STATUS_OKAY(zmk_behavior_key_press))
+#else
+#define TD_KP_NAME_INIT NULL
+#endif
+
+/* 0 = ok, 1 = the behavior has no local id yet (zmk assigns them in its own
+ * settings commit, which can run after ours on a fresh device). */
+static int __maybe_unused binding_to_output(const struct zmk_behavior_binding *b,
+                                            struct flask_tapdance_output *o) {
+    static const char *const kp_name = TD_KP_NAME_INIT;
+    zmk_behavior_local_id_t id;
+
+    memset(o, 0, sizeof(*o));
+    if (kp_name != NULL && strcmp(b->behavior_dev, kp_name) == 0) {
+        o->action = FLASK_TD_OUT_USAGE;
+        o->param1 = b->param1;
+        return 0;
+    }
+    id = zmk_behavior_get_local_id(b->behavior_dev);
+    if (id == 0 || id == UINT16_MAX) {
+        return 1;
+    }
+    o->action = FLASK_TD_OUT_BEHAVIOR;
+    o->behavior_id = id;
+    o->param1 = b->param1;
+    o->param2 = b->param2;
+    normalize_output(o);
+    return 0;
+}
+
+/* Seed each default into its slot only if settings never held that slot
+ * (no flask/tapdance/s<idx>, tombstones included) and it is still empty, so
+ * app edits win forever after. Not dirty: the seed is not written to flash
+ * until the app changes the slot. Returns bindings still unresolved
+ * (flask_proto retries). Idempotent. */
+static int __maybe_unused seed_defaults(const struct td_default *defs, int n) {
+    int unresolved = 0;
+
+    for (int i = 0; i < n; i++) {
+        const struct td_default *d = &defs[i];
+        struct flask_tapdance_slot s = {0};
+        int bad = 0;
+
+        if (d->slot >= FLASK_TAPDANCE_SLOTS) {
+            continue;
+        }
+        K_SPINLOCK(&cfg_lock) { slots_defaulted |= BIT64(d->slot); }
+        for (int t = 0; t < d->n_bind && t < FLASK_TAPDANCE_TAPS; t++) {
+            bad += binding_to_output(&d->b[t], &s.taps[t]);
+        }
+        if (bad) {
+            unresolved += bad;
+            continue;
+        }
+        s.term_ms = d->term_ms ? CLAMP(d->term_ms, TD_TERM_MIN_MS, TD_TERM_MAX_MS) : 0;
+        s.release_ms = MIN(d->release_ms, TD_RELEASE_MAX_MS);
+        s.flags = d->flags & FLASK_TD_FLAGS_KNOWN;
+        K_SPINLOCK(&cfg_lock) {
+            if (((slots_saved | slots_seeded) & BIT64(d->slot)) == 0 &&
+                slot_is_empty(&cfg.slots[d->slot])) {
+                cfg.slots[d->slot] = s;
+            }
+            slots_seeded |= BIT64(d->slot);
+        }
+    }
+    return unresolved;
+}
+
+#if DT_HAS_COMPAT_STATUS_OKAY(flask_tapdance_defaults)
+
+#define FTDD_NODE DT_COMPAT_GET_ANY_STATUS_OKAY(flask_tapdance_defaults)
+#define FTDD_BIND(i, child) ZMK_KEYMAP_EXTRACT_BINDING(i, child)
+#define FTDD_CHILD(child)                                                                          \
+    {                                                                                              \
+        .slot = DT_PROP(child, slot),                                                              \
+        .term_ms = DT_PROP_OR(child, term_ms, 0),                                                  \
+        .release_ms = DT_PROP_OR(child, release_ms, 0),                                            \
+        .flags = DT_PROP(child, eager) ? FLASK_TD_FLAG_EAGER : 0,                                  \
+        .n_bind = DT_PROP_LEN(child, bindings),                                                    \
+        .b = {LISTIFY(DT_PROP_LEN(child, bindings), FTDD_BIND, (, ), child)},                      \
+    },
+#define FTDD_CHECK(child)                                                                          \
+    BUILD_ASSERT(DT_PROP(child, slot) < FLASK_TAPDANCE_SLOTS,                                      \
+                 "tap dance default: slot >= ZMK_FLASK_TAPDANCE_SLOTS");                           \
+    BUILD_ASSERT(DT_PROP_LEN(child, bindings) <= FLASK_TAPDANCE_TAPS,                              \
+                 "tap dance default: more bindings than ZMK_FLASK_TAPDANCE_TAPS");
+
+DT_FOREACH_CHILD(FTDD_NODE, FTDD_CHECK)
+
+static const struct td_default td_defaults[] = {DT_FOREACH_CHILD(FTDD_NODE, FTDD_CHILD)};
+
+int flask_tapdance_defaults_commit(void) {
+    return seed_defaults(td_defaults, ARRAY_SIZE(td_defaults));
+}
+
+#else /* no defaults node in the keymap */
+
+int flask_tapdance_defaults_commit(void) { return 0; }
+
+#endif
 
 static int flask_tapdance_init(void) {
     for (int i = 0; i < TD_MAX_HELD; i++) {

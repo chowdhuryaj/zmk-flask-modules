@@ -25,6 +25,10 @@
  * for the Nth press, sticky at the last), held with the key; the chain
  * stays open for the term after each press. Holds are ignored.
  *
+ * Fixed-slot nodes (`slot = <n>`, #binding-cells 0) run one slot with no
+ * param, e.g. as a hold-tap's tap binding. A `flask,tapdance-defaults`
+ * node seeds slots at boot that settings never held (app edits win).
+ *
  * Outputs are typed like combos v12: encoded HID usage, flask_macros
  * slot, or any Studio-addressable behavior by local id with two params —
  * fired with the dance's key position, so a hold-tap output behaves like
@@ -120,6 +124,11 @@ void flask_tapdance_interrupt(uint32_t position, int64_t timestamp);
 /* Persist via settings subtree "flask/tapdance" ("cfg" + "s<idx>" per
  * used slot). CMD_SAVE path — flask_save queue only. */
 int flask_tapdance_save(void);
+
+/* Seed slots from the keymap's flask,tapdance-defaults node where settings
+ * never held them. Returns bindings whose behavior local id is not assigned
+ * yet (call again later; idempotent). Run from the settings commit. */
+int flask_tapdance_defaults_commit(void);
 
 int flask_tapdance_settings_restore(const char *sub, size_t len, settings_read_cb read_cb,
                                     void *cb_arg);

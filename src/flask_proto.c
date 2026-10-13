@@ -2700,13 +2700,15 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
 
 /* h_commit runs once after the whole settings tree loads — the hook for
  * anything that must wait for "restore is complete" (combos DT defaults:
- * a saved edit or tombstoned deletion of a default must win the slot).
+ * a saved edit or tombstoned deletion of a default must win the slot; same
+ * for adaptive and tap dance defaults).
  *
  * SETTINGS_TABLE behavior local ids are assigned in zmk's OWN handler
  * commit, whose order relative to this one is link-dependent — on a fresh
  * device the first pass can see unassigned ids. Retry on the flask_save
  * queue until every default resolves (bounded; idempotent). */
-#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS) || IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS) || IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE) ||    \
+    IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
 static void defaults_retry(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(defaults_work, defaults_retry);
 static int defaults_tries;
@@ -2722,6 +2724,9 @@ static int defaults_commit_all(void) {
 #if IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
     pending += flask_adaptive_defaults_commit();
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+    pending += flask_tapdance_defaults_commit();
+#endif
     return pending;
 }
 
@@ -2735,7 +2740,8 @@ static void defaults_retry(struct k_work *work) {
 #endif
 
 static int flask_settings_commit(void) {
-#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS) || IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE)
+#if IS_ENABLED(CONFIG_ZMK_FLASK_COMBOS) || IS_ENABLED(CONFIG_ZMK_FLASK_ADAPTIVE) ||    \
+    IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
     if (defaults_commit_all() > 0) {
         defaults_tries = 0;
         k_work_reschedule_for_queue(&flask_save_q, &defaults_work, K_MSEC(500));

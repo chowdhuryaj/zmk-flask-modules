@@ -8,6 +8,8 @@
 #include <zephyr/sys/util.h>
 
 #define __packed __attribute__((packed))
+#define __maybe_unused __attribute__((unused))
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define BUILD_ASSERT(c, m) _Static_assert(c, m)
 #define ARG_UNUSED(x) (void)(x)
 #define CONTAINER_OF(p, T, f) ((T *)((char *)(p) - offsetof(T, f)))

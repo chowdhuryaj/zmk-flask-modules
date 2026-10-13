@@ -14,6 +14,12 @@
 
 #define ID_FTD 10
 #define ID_FAK 11
+#define ID_SDEL 12
+#define ID_WDEL 13
+#define ID_LATE 14
+
+static bool late_ok;
+static int deletes;
 #define OTHER_POS 9
 #define OTHER_KC 99
 
@@ -40,6 +46,15 @@ zmk_behavior_local_id_t zmk_behavior_get_local_id(const char *name) {
     if (strcmp(name, "zmk_behavior_flask_tapdance") == 0) {
         return ID_FTD;
     }
+    if (strcmp(name, "sdel_td") == 0) {
+        return ID_SDEL; /* fixed-slot dance instance (stub devicetree) */
+    }
+    if (strcmp(name, "wdel_mm") == 0) {
+        return ID_WDEL;
+    }
+    if (strcmp(name, "late") == 0) {
+        return late_ok ? ID_LATE : 0; /* local id not assigned yet */
+    }
     return strcmp(name, "zmk_behavior_flask_adaptive") == 0 ? ID_FAK : UINT16_MAX;
 }
 
@@ -64,7 +79,10 @@ int settings_save_one(const char *name, const void *value, size_t len) {
     return 0;
 }
 
-int settings_delete(const char *name) { return 0; }
+int settings_delete(const char *name) {
+    deletes++;
+    return 0;
+}
 
 static ssize_t read_buf(void *arg, void *data, size_t len) {
     memcpy(data, arg, len);
@@ -622,6 +640,81 @@ int main(void) {
     assert(flask_tapdance_settings_restore("s9", saved_len, read_buf, saved_buf) == 0);
     flask_tapdance_slot_get(9, &s);
     check("eager flag persists with the slot", s.flags == FLASK_TD_FLAG_EAGER && s.term_ms == 400, "");
+
+    /* Fixed-slot dance instances are dances too (recursion guard). */
+    check("fixed-slot instance is a dance", flask_behavior_id_is_tapdance(ID_SDEL) &&
+                                                flask_behavior_id_is_dispatcher(ID_SDEL), "");
+    set_out(13, 0, false, FLASK_TD_OUT_BEHAVIOR, ID_SDEL, 0);
+    flask_tapdance_slot_get(13, &s);
+    check("fixed-slot instance refused as output", s.taps[0].action == FLASK_TD_OUT_NONE, "");
+
+    /* Compiled defaults: seed only slots settings never held. */
+    {
+        static const struct td_default defs[] = {
+            {.slot = 13, .term_ms = 400, .flags = FLASK_TD_FLAG_EAGER, .n_bind = 2,
+             .b = {{"zmk_behavior_key_press", 0x7002A, 0}, {"wdel_mm", 0, 0}}},
+            {.slot = 14, .term_ms = 400, .n_bind = 1, .b = {{"zmk_behavior_key_press", 4, 0}}},
+            {.slot = 12, .release_ms = 5000, .n_bind = 2, .b = {{"late", 7, 0}, {"sdel_td", 0, 0}}},
+        };
+        struct flask_tapdance_slot saved14 = {.term_ms = 300};
+        uint8_t keep[sizeof(struct flask_tapdance_slot)];
+
+        for (int i = 12; i <= 14; i++) {
+            memset(&cfg.slots[i], 0, sizeof(cfg.slots[i]));
+            slots_saved &= ~BIT64(i);
+            slots_seeded &= ~BIT64(i);
+        }
+        slots_dirty = 0;
+        saved14.taps[0] = (struct flask_tapdance_output){.action = FLASK_TD_OUT_USAGE, .param1 = 9};
+        memcpy(keep, &saved14, sizeof(keep));
+        assert(flask_tapdance_settings_restore("s14", sizeof(keep), read_buf, keep) == 0);
+
+        rc = seed_defaults(defs, ARRAY_SIZE(defs));
+        check("seed: unresolved id reported", rc == 1, "");
+        flask_tapdance_slot_get(13, &s);
+        check("seed: absent slot seeded", s.term_ms == 400 && s.flags == FLASK_TD_FLAG_EAGER &&
+                                              s.taps[0].action == FLASK_TD_OUT_USAGE &&
+                                              s.taps[0].param1 == 0x7002A &&
+                                              s.taps[1].behavior_id == ID_WDEL,
+              "");
+        check("seed: not dirty (not written to flash)", slots_dirty == 0, "");
+        flask_tapdance_slot_get(14, &s);
+        check("seed: saved slot wins", s.term_ms == 300 && s.taps[0].param1 == 9, "");
+        flask_tapdance_slot_get(12, &s);
+        check("seed: unresolved slot left alone", s.taps[0].action == FLASK_TD_OUT_NONE, "");
+        late_ok = true;
+        flask_tapdance_term_set(13, 250);
+        rc = seed_defaults(defs, ARRAY_SIZE(defs));
+        flask_tapdance_slot_get(12, &s);
+        check("seed: retry resolves, clamps, refuses dance output",
+              rc == 0 && s.taps[0].behavior_id == ID_LATE && s.release_ms == 1000 &&
+                  s.taps[1].action == FLASK_TD_OUT_NONE,
+              "");
+        flask_tapdance_slot_get(13, &s);
+        check("seed: idempotent, app edit kept", s.term_ms == 250, "");
+
+        /* App empties the defaulted slot: SAVE writes a tombstone, not a
+         * delete, so the next boot does not seed it back. */
+        for (int t = 0; t < 2; t++) {
+            set_out(13, t, false, FLASK_TD_OUT_NONE, 0, 0);
+        }
+        flask_tapdance_term_set(13, 0);
+        flask_tapdance_flags_set(13, 0);
+        slots_dirty = BIT64(13);
+        deletes = 0;
+        flask_tapdance_save();
+        check("seed: emptied default saves a tombstone",
+              deletes == 0 && strcmp(saved_key, "flask/tapdance/s13") == 0 &&
+                  saved_len == sizeof(s),
+              "");
+        memset(&cfg.slots[13], 0, sizeof(cfg.slots[13]));
+        slots_saved &= ~BIT64(13);
+        slots_seeded &= ~BIT64(13);
+        assert(flask_tapdance_settings_restore("s13", saved_len, read_buf, saved_buf) == 0);
+        seed_defaults(defs, ARRAY_SIZE(defs));
+        flask_tapdance_slot_get(13, &s);
+        check("seed: tombstone survives reboot", s.term_ms == 0 && s.taps[0].action == 0, "");
+    }
 
     /* balance: every +X has a later -X */
     idle();

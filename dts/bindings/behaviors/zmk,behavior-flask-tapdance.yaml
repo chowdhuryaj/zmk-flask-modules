@@ -2,7 +2,9 @@
 description: |
   "Flask runtime tap-dance trigger behavior. Param selects the dance slot;
   the slot's tapping term and per-tap-count outputs are live-editable over
-  the Flask protocol (channel 0x28)."
+  the Flask protocol (channel 0x28). With a `slot` property the node is a
+  fixed-slot dance instead: #binding-cells = <0>, no param (usable as a
+  hold-tap's tap binding)."
 
 compatible: "zmk,behavior-flask-tapdance"
 
@@ -12,7 +14,8 @@ properties:
   "#binding-cells":
     type: int
     required: true
-    const: 1
-
-binding-cells:
-  - param1
+    enum: [0, 1]
+    description: "1 for &ftd <slot>; 0 for a fixed-slot node (needs `slot`)"
+  slot:
+    type: int
+    description: "Fixed dance slot (makes the node take no binding cell)"

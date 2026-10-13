@@ -1,0 +1,33 @@
+# Compiled default tap dances for flask_tapdance (runtime tap dances, Flask
+# channel 0x28). Each child seeds one slot at boot ONLY if settings never
+# held that slot (no flask/tapdance/s<slot> key), so app edits win forever
+# after; an app-emptied default is saved as an all-zero tombstone. `&kp X`
+# bindings become usage outputs, every other binding a behavior output by
+# local id (a dance as an output is refused).
+#
+# SPDX-License-Identifier: MIT
+
+description: "Default tap dance slots for the flask_tapdance runtime engine"
+
+compatible: "flask,tapdance-defaults"
+
+child-binding:
+  description: "One default dance slot"
+
+  properties:
+    slot:
+      type: int
+      required: true
+    bindings:
+      type: phandle-array
+      required: true
+      description: "Tap outputs in tap-count order (at most ZMK_FLASK_TAPDANCE_TAPS)"
+    term-ms:
+      type: int
+      description: "Tapping term, ms (absent = default 200)"
+    release-ms:
+      type: int
+      description: "After-release window, ms (absent = off)"
+    eager:
+      type: boolean
+      description: "Fire each step at press (Super Delete feel)"
