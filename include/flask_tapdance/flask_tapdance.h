@@ -91,6 +91,13 @@ int flask_tapdance_output_set(uint8_t idx, uint8_t tap, bool hold,
 int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp);
 int flask_tapdance_released(uint8_t slot, uint32_t position, int64_t timestamp);
 
+/* Resolve every undecided dance not at `position` as its tap (no-op for
+ * decided ones, so calling it twice for one press is safe). Called by the
+ * module's own listener and from paths that listener cannot see: presses
+ * replayed by flask_holdtap (flask_tapdance_replay.c) and completed
+ * flask_combos (position UINT32_MAX = interrupt every dance). */
+void flask_tapdance_interrupt(uint32_t position, int64_t timestamp);
+
 /* Persist via settings subtree "flask/tapdance" ("cfg" + "s<idx>" per
  * used slot). CMD_SAVE path — flask_save queue only. */
 int flask_tapdance_save(void);

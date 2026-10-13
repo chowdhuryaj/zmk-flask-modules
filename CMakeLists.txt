@@ -49,12 +49,16 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   # must see key events AFTER those capture engines, so its latch-swallow
   # decision matches what actually reaches the keymap.
   target_sources_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE app PRIVATE src/input_processor_flask_automouse.c)
-  # Holdtap is LAST among the central listeners except autoexit and
+  # Holdtap is LAST among the central listeners except tapdance replay, autoexit and
   # autoshift (below): core hold-tap's listener sits after every module
   # listener (module sources link before zmk's own), and this port must hold
   # the same relative position — after combos/leader/automouse capture,
   # before core hold-tap and the keymap.
   target_sources_ifdef(CONFIG_ZMK_FLASK_HOLDTAP app PRIVATE src/behavior_flask_holdtap.c)
+  # Right after flask_holdtap: its replayed presses (RAISE_AT holdtap) skip
+  # flask_tapdance.c's listener, so this one interrupts dances for them
+  # before autoshift and the keymap type the replayed key.
+  target_sources_ifdef(CONFIG_ZMK_FLASK_TAPDANCE app PRIVATE src/flask_tapdance_replay.c)
   # After flask_holdtap, before core hold-tap and the keymap: the autoexit
   # decision sees presses as the keymap will (combo keys swallowed,
   # hold-tap captures replayed after the decision).

@@ -102,6 +102,7 @@ struct active_dance {
     bool decided;
     bool at_max; /* counter hit the length with a hold pending: release = tap */
     int64_t release_at;
+    int64_t pressed_at; /* last PHYSICAL press: the bypass stamp for its outputs */
     /* Copied at resolve: the release must mirror the press even if the
      * table was rewritten mid-hold. */
     struct flask_tapdance_output fired;
@@ -113,6 +114,12 @@ static struct active_dance dances[TD_MAX_HELD];
 /* Timestamp of the most recent keycode press (any source), for the
  * fast-typing bypass. -1 = none yet (timestamps are uptime, never < 0). */
 static int64_t last_keycode_press = -1;
+
+/* While a dance fires its own press output: that dance's last physical
+ * press time, stamped instead of the output's (delayed) event time, so a
+ * timer- or interrupt-resolved output does not make the NEXT dance a
+ * bypass. -1 = not inside a dance output. */
+static int64_t own_output_at = -1;
 
 static void fire_output_raw(const struct flask_tapdance_output *out, uint32_t position,
                             bool pressed, int64_t timestamp) {
@@ -213,7 +220,9 @@ static void press_dance(struct active_dance *d, bool hold, int64_t timestamp) {
                                                                        : s->taps[i];
         }
     }
+    own_output_at = d->pressed_at;
     fire_output(&d->fired, d->position, true, timestamp);
+    own_output_at = -1;
 }
 
 static void release_dance(struct active_dance *d, int64_t timestamp) {
@@ -287,6 +296,7 @@ int flask_tapdance_pressed(uint8_t slot, uint32_t position, int64_t timestamp) {
     }
 
     d->is_pressed = true;
+    d->pressed_at = timestamp;
     stop_timer(d);
     if (d->counter == 0 && prior_idle > 0 && last_keycode_press >= 0 &&
         timestamp - last_keycode_press < prior_idle) {
@@ -334,6 +344,23 @@ int flask_tapdance_released(uint8_t slot, uint32_t position, int64_t timestamp) 
     return 0;
 }
 
+void flask_tapdance_interrupt(uint32_t position, int64_t timestamp) {
+    for (int i = 0; i < TD_MAX_HELD; i++) {
+        struct active_dance *d = &dances[i];
+
+        if (d->position == TD_POSITION_FREE || d->position == position) {
+            continue;
+        }
+        stop_timer(d);
+        if (!d->decided) {
+            press_dance(d, false, timestamp);
+            if (!d->is_pressed) {
+                release_dance(d, timestamp);
+            }
+        }
+    }
+}
+
 /* Interrupts: any OTHER key's press resolves undecided dances first (as
  * the tap), so "dance key then letter" keeps its order (core listener).
  * Keycode presses only stamp the fast-typing clock. */
@@ -344,29 +371,16 @@ static int td_listener(const zmk_event_t *eh) {
         /* Modifiers never count (as flask_adaptive): a held Ctrl or a
          * hold-tap's mod must not turn the next dance into a bypass. */
         if (kc->state && !is_mod(kc->usage_page, kc->keycode)) {
-            last_keycode_press = kc->timestamp;
+            last_keycode_press =
+                MAX(last_keycode_press, own_output_at >= 0 ? own_output_at : kc->timestamp);
         }
         return ZMK_EV_EVENT_BUBBLE;
     }
 
     struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
 
-    if (ev == NULL || !ev->state) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-    for (int i = 0; i < TD_MAX_HELD; i++) {
-        struct active_dance *d = &dances[i];
-
-        if (d->position == TD_POSITION_FREE || d->position == ev->position) {
-            continue;
-        }
-        stop_timer(d);
-        if (!d->decided) {
-            press_dance(d, false, ev->timestamp);
-            if (!d->is_pressed) {
-                release_dance(d, ev->timestamp);
-            }
-        }
+    if (ev != NULL && ev->state) {
+        flask_tapdance_interrupt(ev->position, ev->timestamp);
     }
     return ZMK_EV_EVENT_BUBBLE;
 }

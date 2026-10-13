@@ -61,6 +61,9 @@
 #if IS_ENABLED(CONFIG_ZMK_FLASK_AUTOSHIFT)
 #include <flask_autoshift/flask_autoshift.h>
 #endif
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+#include <flask_tapdance/flask_tapdance.h>
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_FLASK_LAYER_AUTOEXIT)
 void flask_layer_autoexit_hold(const struct zmk_behavior_binding *b,
@@ -435,6 +438,14 @@ static void activate_combo(int slot_idx) {
     /* The combo's own output must not count as a "tap" for prior-idle
      * (core combo.c last_combo_timestamp). */
     last_combo_ts = timestamp;
+#if IS_ENABLED(CONFIG_ZMK_FLASK_TAPDANCE)
+    /* The combo swallowed its keys, so flask_tapdance's listener never saw
+     * them: resolve pending dances (all positions — a dance key can be a
+     * combo key) before the combo types. Here, not in the earlier keystate
+     * listener: dance outputs fired there would stamp last_tapped_ts ahead
+     * of this module's prior-idle check. At last_combo_ts they don't. */
+    flask_tapdance_interrupt(UINT32_MAX, timestamp);
+#endif
     fire_output(active, true, timestamp);
 }
 

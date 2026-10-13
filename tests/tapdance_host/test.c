@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "../../src/flask_tapdance.c"
+#include "../../src/flask_tapdance_replay.c"
 
 #include <assert.h>
 #include <stdio.h>
@@ -450,6 +451,66 @@ int main(void) {
     expect("repress hold release", "-20 ");
     td_down(8); td_up(8); td_down(8); td_up(8);
     expect("repress after max-fast: fresh", "+50 -50 +50 -50 ");
+
+    /* flask_holdtap replay: RAISE_AT(holdtap) skips flask_tapdance.c's
+     * listener; the replayed P starts a dance via the keymap, the replayed X
+     * reaches only the replay listener (linked after holdtap). */
+    idle();
+    {
+        struct zmk_position_state_changed x = {{STUB_EV_POSITION}, OTHER_POS, true, stub_now};
+
+        flask_tapdance_pressed(0, 0, stub_now);
+        stub_listener_flask_tapdance_replay(&x.header);
+        raise_zmk_keycode_state_changed_from_encoded(OTHER_KC, true, stub_now);
+        expect("replayed press interrupts the dance", "+4 +99 ");
+        stub_listener_flask_tapdance_replay(&x.header); /* idempotent */
+        advance(300);
+        expect("replay interrupt idempotent", "");
+        other_up();
+        td_up(0);
+        expect("replayed dance releases", "-99 -4 ");
+    }
+
+    /* Completed flask_combo: its keys never reach the listener; combos calls
+     * interrupt(UINT32_MAX) before typing (the dance key may be a combo key). */
+    idle();
+    td_down(0); td_up(0); advance(50);
+    flask_tapdance_interrupt(UINT32_MAX, stub_now);
+    raise_zmk_keycode_state_changed_from_encoded(77, true, stub_now);
+    expect("combo interrupts the dance first", "+4 -4 +77 ");
+    raise_zmk_keycode_state_changed_from_encoded(77, false, stub_now);
+    td_down(0); advance(50);
+    flask_tapdance_interrupt(UINT32_MAX, stub_now);
+    expect("combo interrupts a held dance too", "-77 +4 ");
+    td_up(0);
+    expect("combo-interrupted held dance release", "-4 ");
+
+    /* The dance's own delayed output stamps its physical press time, not the
+     * output's event time (prior idle 150 on slot 2). */
+    idle();
+    td_down(2); td_up(2); advance(200);
+    expect("timer-resolved output", "+9 -9 ");
+    advance(50); td_down(2); /* 250 ms after the physical press */
+    expect("timer output does not arm bypass", "");
+    td_up(2); advance(300);
+    expect("timer output: next dance taps", "+9 -9 ");
+    idle();
+    td_down(2); td_up(2); advance(100);
+    position(OTHER_POS, true); /* non-keycode key (layer) interrupts */
+    expect("interrupt-resolved output", "+9 -9 ");
+    position(OTHER_POS, false);
+    advance(100); td_down(2); /* 200 ms after the physical press */
+    expect("interrupt output does not arm bypass", "");
+    td_up(2); advance(300);
+    out_log[0] = 0;
+    idle();
+    td_down(2); td_up(2); advance(50);
+    position(OTHER_POS, true);
+    position(OTHER_POS, false);
+    advance(50); td_down(2); /* 100 ms after the physical press */
+    expect("own output still stamps the press time", "+9 -9 +9 ");
+    td_up(2);
+    expect("own output stamp: release", "-9 ");
 
     /* balance: every +X has a later -X */
     idle();
