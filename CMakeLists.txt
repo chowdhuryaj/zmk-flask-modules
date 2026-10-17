@@ -39,6 +39,7 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_TAPDANCE app PRIVATE src/behavior_flask_tapdance.c)
   target_sources_ifdef(CONFIG_ZMK_FLASK_MACROS app PRIVATE src/flask_macros.c)
   target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_MACROS app PRIVATE src/behavior_flask_macros.c)
+  target_sources_ifdef(CONFIG_ZMK_BEHAVIOR_FLASK_OS_KEY app PRIVATE src/behavior_flask_os_key.c)
   # flask_leader's listener must run AFTER flask_proto's keystate listener
   # (same link-order rule as combos) and after combos' capture.
   target_sources_ifdef(CONFIG_ZMK_FLASK_LEADER app PRIVATE src/flask_leader.c)

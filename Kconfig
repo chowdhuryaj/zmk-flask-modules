@@ -474,6 +474,15 @@ config ZMK_BEHAVIOR_FLASK_BALLSWAP
       Keymap behavior driving flask_ballswap: &bswap 0 toggles the
       persisted swap, &bswap 1 swaps while held.
 
+DT_COMPAT_ZMK_BEHAVIOR_FLASK_OS_KEY := zmk,behavior-flask-os-key
+
+config ZMK_BEHAVIOR_FLASK_OS_KEY
+    bool "OS-aware shortcut behavior (&osk)"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_FLASK_OS_KEY))
+    help
+      &osk <mac> <pc>: sends the Mac chord or the PC chord depending on the
+      zmk-switch-layout OS mode. Both params are Studio-assignable HID usages.
+
 DT_COMPAT_ZMK_BEHAVIOR_FLASK_MACROS := zmk,behavior-flask-macros
 
 config ZMK_BEHAVIOR_FLASK_MACROS
