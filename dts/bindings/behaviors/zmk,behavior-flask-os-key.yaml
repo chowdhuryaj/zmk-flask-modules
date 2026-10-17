@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+description: |
+  "OS-aware shortcut. param1 is the chord sent while the OS mode
+  (zmk-switch-layout index) is Mac, param2 the chord sent while it is PC.
+  Both are &kp-style encoded usages (modifiers in the top byte); 0 sends
+  nothing on that OS."
+
+compatible: "zmk,behavior-flask-os-key"
+
+properties:
+  display-name:
+    type: string
+  "#binding-cells":
+    type: int
+    required: true
+    const: 2
+
+binding-cells:
+  - param1
+  - param2
