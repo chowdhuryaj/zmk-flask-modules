@@ -22,6 +22,8 @@
 
 #define DT_DRV_COMPAT zmk_input_processor_flask_scroll
 
+#include <stdlib.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/input/input.h>
@@ -41,6 +43,8 @@ struct flask_scroll_data {
     struct flask_scroll_params live; /* runtime-tunable copy of the DT config */
     int32_t rem_x, rem_y;            /* raw counts short of a whole notch */
     int32_t accum_h, accum_v;        /* whole notches awaiting emission */
+    int32_t sum_x, sum_y;            /* recent |counts| per axis, for h_bias_pct */
+    int64_t last_ms;                 /* last motion event, for the bias idle reset */
     bool running;                    /* dump timer armed */
 };
 
@@ -71,6 +75,7 @@ int flask_scroll_params_set(const struct flask_scroll_params *in) {
     p.divisor_y = CLAMP(p.divisor_y, 1, 10000);
     p.interval_ms = CLAMP(p.interval_ms, 1, 1000);
     p.max_notches = CLAMP(p.max_notches, 1, 127);
+    p.h_bias_pct = MIN(p.h_bias_pct, 1000);
 
     K_SPINLOCK(&data->lock) {
         data->live = p;
@@ -116,6 +121,43 @@ static void flask_scroll_dump(struct k_work *work) {
     }
 }
 
+/* A pause this long starts a fresh gesture (no history from the last one). */
+#define BIAS_IDLE_MS 200
+
+/* Vertical-priority snap on raw counts, before the notch divisors (the
+ * wheel-level flask_scrollsnap would only see a few notches per window and
+ * delays the first ones). Sums are a cheap sliding window: halved whenever
+ * they pass 2 notches of travel on each axis, so the decision follows the
+ * last few notches of motion and a deliberate turn sideways wins within a
+ * couple of horizontal notches. Horizontal also needs one full horizontal notch of travel in the
+ * window, so the first X event of a vertical roll (sum_y still 0) cannot win.
+ * Caller holds data->lock. */
+static bool bias_allows(struct flask_scroll_data *data, const struct input_event *event) {
+    int64_t now = k_uptime_get();
+    int32_t window = 2 * (data->live.divisor_x + data->live.divisor_y);
+
+    if (now - data->last_ms > BIAS_IDLE_MS) {
+        data->sum_x = 0;
+        data->sum_y = 0;
+    }
+    data->last_ms = now;
+
+    if (event->code == INPUT_REL_X) {
+        data->sum_x += abs(event->value);
+    } else {
+        data->sum_y += abs(event->value);
+    }
+    if (data->sum_x + data->sum_y > window) {
+        data->sum_x /= 2;
+        data->sum_y /= 2;
+    }
+
+    bool x_wins = data->sum_x >= data->live.divisor_x &&
+                  (int64_t)data->sum_x * 100 > (int64_t)data->sum_y * data->live.h_bias_pct;
+
+    return (event->code == INPUT_REL_X) == x_wins;
+}
+
 static int flask_scroll_handle_event(const struct device *dev, struct input_event *event,
                                      uint32_t param1, uint32_t param2,
                                      struct zmk_input_processor_state *state) {
@@ -127,7 +169,15 @@ static int flask_scroll_handle_event(const struct device *dev, struct input_even
     }
 
     K_SPINLOCK(&data->lock) {
-        if (event->code == INPUT_REL_X) {
+        if (data->live.h_bias_pct > 0 && !bias_allows(data, event)) {
+            /* Losing axis: drop it, with its partial notch, so drift never
+             * builds up into a stray notch later. */
+            if (event->code == INPUT_REL_X) {
+                data->rem_x = 0;
+            } else {
+                data->rem_y = 0;
+            }
+        } else if (event->code == INPUT_REL_X) {
             data->rem_x += event->value;
             int32_t notches = data->rem_x / data->live.divisor_x;
             data->rem_x -= notches * data->live.divisor_x;
@@ -190,6 +240,7 @@ static const struct zmk_input_processor_driver_api flask_scroll_api = {
             .max_notches = DT_INST_PROP(n, max_notches),                                           \
             .invert_x = DT_INST_PROP(n, invert_x),                                                 \
             .invert_y = DT_INST_PROP(n, invert_y),                                                 \
+            .h_bias_pct = MIN(DT_INST_PROP(n, h_bias_pct), 1000),                                  \
         },                                                                                         \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, flask_scroll_init, NULL, &flask_scroll_data_##n,                      \

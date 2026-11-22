@@ -48,3 +48,12 @@ properties:
   invert-y:
     type: boolean
     description: Invert vertical wheel output.
+
+  h-bias-pct:
+    type: int
+    default: 0
+    description: |
+      Vertical priority. 0 = off (both axes scroll together). Otherwise the
+      scroll is single-axis: horizontal only while recent sideways counts
+      exceed this percent of recent vertical counts (300 = sideways must be
+      3x the vertical), vertical the rest of the time. Clamped 0..1000.

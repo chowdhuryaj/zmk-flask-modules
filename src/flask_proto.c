@@ -52,6 +52,10 @@
 #include <flask_accel/flask_accel.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH)
+#include <flask_smooth/flask_smooth.h>
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
 #include <flask_scrollsnap/flask_scrollsnap.h>
 #endif
@@ -276,8 +280,17 @@ __weak bool flask_proto_ext_handle(uint8_t cmd, uint8_t channel, uint8_t value_i
  * [slot, flags u8] (bit 0 = eager: every press fires its step at once,
  * Super Delete style; unknown bits cleared). Slot blobs grow by 3 bytes;
  * v22 and older blobs load with both off and are rewritten on the next
- * SAVE. Probe = proto >= 23. */
-#define FLASK_PROTO_VERSION 23
+ * SAVE. Probe = proto >= 23.
+ * v24 (2026-11-22): (a) drag scroll vertical priority, channel 0x15 value
+ * 0x0B (flask_scroll h_bias_pct: 0 = off, else horizontal scrolls only while
+ * recent sideways counts exceed this percent of the vertical ones; clamp
+ * 1000). flask/scroll blob is version 2 (v1 ignored, DT defaults). (b)
+ * pointer smoothing channel 0x13 (flask_smooth), the QMK families' wire:
+ * enabled 0x01, factor 0x02 x100 (100 = raw, lower = heavier; clamp
+ * 1..100), timeout 0x03 ms (clamp 1000); SAVE via "flask/smooth". Both
+ * answer unhandled where the processor is not compiled (Totem dongle only
+ * today). Probe = proto >= 24, then GET. */
+#define FLASK_PROTO_VERSION 24
 /* Family id: Kconfig ZMK_FLASK_FAMILY (default 4 = imprint; 1=adept
  * 2=svalboard 3=nlkb16 4=imprint 5=gmk70 (QMK) 6=totem). */
 
@@ -292,6 +305,7 @@ __weak bool flask_proto_ext_handle(uint8_t cmd, uint8_t channel, uint8_t value_i
 #define CH_META 0x00
 #define CH_ACCEL 0x10 /* QMK accel channel — same wire shape (v9) */
 #define CH_GESTURES 0x11 /* QMK gestures channel — shared knob ids, ZMK slot frame (v10) */
+#define CH_SMOOTHING 0x13 /* QMK smoothing channel — same wire shape (v24) */
 #define CH_DRAGSCROLL 0x15
 #define CH_CSK 0x16 /* QMK customShift channel — shared enabled/count ids, ZMK slot frame (v14) */
 #define CH_LEADER 0x19 /* QMK leader channel — shared timeout id, ZMK slot frame (v10) */
@@ -372,6 +386,7 @@ __weak bool flask_proto_ext_handle(uint8_t cmd, uint8_t channel, uint8_t value_i
 #define DRAG_INTERVAL 0x06
 #define DRAG_MAX_NOTCHES 0x07
 #define DRAG_INVERT_X 0x0A /* orientation correction (horizontal) */
+#define DRAG_H_BIAS 0x0B   /* vertical priority, percent, 0 = off (v24, ZMK line) */
 
 /* Autoscroll values — same wire vocabulary as the QMK families
  * (mad_hid_autoscroll_value in the Adept keymap.c). */
@@ -411,6 +426,12 @@ __weak bool flask_proto_ext_handle(uint8_t cmd, uint8_t channel, uint8_t value_i
 #define ACCEL_GROWTH 0x03
 #define ACCEL_OFFSET 0x04 /* i16 on the wire */
 #define ACCEL_LIMIT 0x05
+
+/* Smoothing values — same wire vocabulary as the QMK families (drashna
+ * pointing_device_smoothing): factor x100, 100 = raw passthrough. */
+#define SMOOTH_ENABLED 0x01
+#define SMOOTH_FACTOR 0x02
+#define SMOOTH_TIMEOUT 0x03
 
 /* Scroll snap values (channel 0x26, ZMK line — no QMK equivalent) */
 /* Channel 0x29 — flask_scrollscale. Percent of the keymap's compiled
@@ -499,7 +520,9 @@ struct flask_scroll_saved {
     struct flask_scroll_params params;
 } __packed;
 
-#define SCROLL_SETTINGS_VERSION 1
+/* v2: params gained h_bias_pct — a v1 blob is a size mismatch and is
+ * ignored (tunables reseed from DT defaults). */
+#define SCROLL_SETTINGS_VERSION 2
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_AUTOSCROLL)
@@ -520,6 +543,15 @@ struct flask_accel_saved {
 } __packed;
 
 #define ACCEL_SETTINGS_VERSION 1
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH)
+struct flask_smooth_saved {
+    uint8_t version;
+    struct flask_smooth_params params;
+} __packed;
+
+#define SMOOTH_SETTINGS_VERSION 1
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
@@ -744,6 +776,55 @@ static bool handle_accel(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
     }
 }
 #endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_ACCEL */
+
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH)
+static bool handle_smooth(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
+    struct flask_smooth_params p;
+
+    if (flask_smooth_params_get(&p) < 0) {
+        return false;
+    }
+
+    if (cmd == CMD_SET) {
+        uint16_t v = rd_u16(payload);
+
+        switch (value_id) {
+        case SMOOTH_ENABLED:
+            p.enabled = (v != 0);
+            break;
+        case SMOOTH_FACTOR:
+            p.factor_x100 = v;
+            break;
+        case SMOOTH_TIMEOUT:
+            p.timeout_ms = v;
+            break;
+        default:
+            return false;
+        }
+        flask_smooth_params_set(&p);
+        /* fall through to GET so the echo carries the clamped value */
+        if (flask_smooth_params_get(&p) < 0) {
+            return false;
+        }
+    } else if (cmd != CMD_GET) {
+        return false;
+    }
+
+    switch (value_id) {
+    case SMOOTH_ENABLED:
+        wr_u16(payload, p.enabled ? 1 : 0);
+        return true;
+    case SMOOTH_FACTOR:
+        wr_u16(payload, p.factor_x100);
+        return true;
+    case SMOOTH_TIMEOUT:
+        wr_u16(payload, p.timeout_ms);
+        return true;
+    default:
+        return false;
+    }
+}
+#endif /* CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH */
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
 static bool handle_scrollsnap(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
@@ -1649,6 +1730,9 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
         case DRAG_INVERT_X:
             p.invert_x = (v != 0);
             break;
+        case DRAG_H_BIAS:
+            p.h_bias_pct = v;
+            break;
         default:
             return false;
         }
@@ -1673,6 +1757,9 @@ static bool handle_dragscroll(uint8_t cmd, uint8_t value_id, uint8_t *payload) {
         return true;
     case DRAG_INVERT_X:
         wr_u16(payload, p.invert_x ? 1 : 0);
+        return true;
+    case DRAG_H_BIAS:
+        wr_u16(payload, p.h_bias_pct);
         return true;
     case DRAG_INTERVAL:
         wr_u16(payload, p.interval_ms);
@@ -2158,6 +2245,21 @@ static bool handle_save(uint8_t channel) {
         return true;
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH)
+    case CH_SMOOTHING: {
+        struct flask_smooth_saved saved = {.version = SMOOTH_SETTINGS_VERSION};
+
+        if (flask_smooth_params_get(&saved.params) < 0) {
+            return false;
+        }
+        int err = settings_save_one("flask/smooth", &saved, sizeof(saved));
+        if (err) {
+            LOG_ERR("flask/smooth settings save failed: %d", err);
+            return false;
+        }
+        return true;
+    }
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP)
     case CH_SCROLLSNAP: {
         struct flask_scrollsnap_saved saved = {.version = SCROLLSNAP_SETTINGS_VERSION};
@@ -2350,6 +2452,11 @@ static int flask_proto_received(const zmk_event_t *eh) {
             ok = handle_accel(cmd, value_id, payload);
             break;
 #endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH)
+        case CH_SMOOTHING:
+            ok = handle_smooth(cmd, value_id, payload);
+            break;
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SCROLLSCALE)
         case CH_SCROLLSCALE:
             ok = handle_scrollscale(cmd, value_id, payload);
@@ -2515,6 +2622,28 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         }
         if (flask_accel_params_set(&saved.params) < 0) {
             LOG_WRN("flask/accel restore: processor not ready");
+        }
+        return 0;
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH)
+    if (settings_name_steq(name, "smooth", NULL)) {
+        struct flask_smooth_saved saved;
+
+        if (len != sizeof(saved)) {
+            LOG_WRN("flask/smooth settings size mismatch (%d != %d)", (int)len,
+                    (int)sizeof(saved));
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
+            return -EIO;
+        }
+        if (saved.version != SMOOTH_SETTINGS_VERSION) {
+            LOG_WRN("flask/smooth settings version %d ignored", saved.version);
+            return 0;
+        }
+        if (flask_smooth_params_set(&saved.params) < 0) {
+            LOG_WRN("flask/smooth restore: processor not ready");
         }
         return 0;
     }

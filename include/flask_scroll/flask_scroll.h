@@ -20,6 +20,11 @@ struct flask_scroll_params {
     int32_t max_notches;
     bool invert_x;
     bool invert_y;
+    /* Vertical priority (0 = off, both axes scroll at once as before).
+     * Horizontal wins only while recent sideways counts exceed this percent
+     * of recent vertical counts (300 = 3x); otherwise X is dropped. While
+     * horizontal wins, Y is dropped. Clamped 0..1000. */
+    uint16_t h_bias_pct;
 };
 
 /* Both return -ENODEV before the processor instance initializes. */

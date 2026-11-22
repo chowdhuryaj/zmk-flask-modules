@@ -1,0 +1,15 @@
+/*
+ * Default flask_smooth instance. Goes on a pointer listener before
+ * acceleration:
+ *
+ *   #include <flask_smooth.dtsi>
+ *   //   input-processors = <&flask_smooth &flask_accel ...>;
+ */
+
+/ {
+    flask_smooth: flask_smooth {
+        compatible = "zmk,input-processor-flask-smooth";
+        #input-processor-cells = <0>;
+        status = "okay";
+    };
+};

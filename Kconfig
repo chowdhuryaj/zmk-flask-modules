@@ -96,6 +96,18 @@ config ZMK_INPUT_PROCESSOR_FLASK_SCROLLSNAP
       for a duration/event count. Every knob is live over the Flask
       protocol (channel 0x26).
 
+DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH := zmk,input-processor-flask-smooth
+
+config ZMK_INPUT_PROCESSOR_FLASK_SMOOTH
+    bool "Flask pointer smoothing input processor"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_SMOOTH))
+    depends on ZMK_POINTING
+    depends on INPUT
+    help
+      Per-axis EMA pointer smoothing, integer port of drashna's
+      pointing_device_smoothing. Live over the Flask protocol (channel
+      0x13, the QMK families' smoothing wire).
+
 DT_COMPAT_ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE := zmk,input-processor-flask-automouse
 
 config ZMK_INPUT_PROCESSOR_FLASK_AUTOMOUSE

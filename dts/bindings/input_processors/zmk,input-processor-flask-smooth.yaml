@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT
+description: |
+  Pointer smoothing: per-axis exponential moving average of REL_X/REL_Y with
+  a rounding carry (integer port of drashna's pointing_device_smoothing, the
+  QMK Flask families' smoothing). Live over Flask channel 0x13. Put it before
+  acceleration on a pointer listener.
+
+compatible: "zmk,input-processor-flask-smooth"
+
+include: ip_zero_param.yaml
+
+properties:
+  factor:
+    type: int
+    default: 40
+    description: "Weight of each new sample, percent (100 = raw, 1 = heaviest; clamped 1..100)"
+  timeout-ms:
+    type: int
+    default: 200
+    description: "Pause that resets the average, ms (clamped 0..1000)"
+  start-disabled:
+    type: boolean
+    description: "Boot with smoothing off (runtime enable over the Flask protocol)"
