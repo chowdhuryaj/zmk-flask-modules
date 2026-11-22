@@ -520,8 +520,9 @@ struct flask_scroll_saved {
     struct flask_scroll_params params;
 } __packed;
 
-/* v2: params gained h_bias_pct — a v1 blob is a size mismatch and is
- * ignored (tunables reseed from DT defaults). */
+/* v2: params gained h_bias_pct. It sits in what was struct padding, so a
+ * v1 blob has the same size: it is restored with h_bias_pct taken from the
+ * live (DT default) value, so other boards keep their saved tuning. */
 #define SCROLL_SETTINGS_VERSION 2
 #endif
 
@@ -2572,7 +2573,14 @@ static int flask_settings_set(const char *name, size_t len, settings_read_cb rea
         if (read_cb(cb_arg, &saved, sizeof(saved)) < 0) {
             return -EIO;
         }
-        if (saved.version != SCROLL_SETTINGS_VERSION) {
+        if (saved.version == 1) {
+            struct flask_scroll_params live;
+
+            if (flask_scroll_params_get(&live) < 0) {
+                return 0;
+            }
+            saved.params.h_bias_pct = live.h_bias_pct; /* v1 padding, not data */
+        } else if (saved.version != SCROLL_SETTINGS_VERSION) {
             LOG_WRN("flask/scroll settings version %d ignored", saved.version);
             return 0;
         }
