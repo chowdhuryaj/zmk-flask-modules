@@ -111,7 +111,23 @@
 #include <flask_autoshift/flask_autoshift.h>
 #endif
 
+#include <flask_proto/flask_proto.h>
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+
+/* Board-owned channels (flask_proto.h). Weak no-op: an image without one
+ * echoes 0xFF as before. A board can't add a second raw_hid listener
+ * instead: ZMK runs subscriptions in link order (.event_subscription is not
+ * sorted), so it could not stop this listener's 0xFF echo for its channel. */
+__weak bool flask_proto_ext_handle(uint8_t cmd, uint8_t channel, uint8_t value_id,
+                                   uint8_t *payload, size_t payload_len) {
+    ARG_UNUSED(cmd);
+    ARG_UNUSED(channel);
+    ARG_UNUSED(value_id);
+    ARG_UNUSED(payload);
+    ARG_UNUSED(payload_len);
+    return false;
+}
 
 /* Per-module channels compile only when their module does — a channel whose
  * module is absent answers unhandled (0xFF), which is how the apps discover
@@ -2400,6 +2416,7 @@ static int flask_proto_received(const zmk_event_t *eh) {
             break;
 #endif
         default:
+            ok = flask_proto_ext_handle(cmd, channel, value_id, payload, sizeof(reply) - 3);
             break;
         }
         break;
