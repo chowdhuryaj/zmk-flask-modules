@@ -11,7 +11,7 @@
  * input processors see one axis event at a time and the mouse host skips
  * zero axes, so an axis that stops just stops reporting (its EMA tail is
  * not emitted, same as QMK, which returns early on zero reports). Q8 fixed
- * point, no float: the image must not pull in soft-float helpers.
+ * point.
  *
  * SPDX-License-Identifier: MIT
  */
